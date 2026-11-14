@@ -50,7 +50,9 @@ struct PultCommand: Identifiable {
         return list(for: provider).filter { query.isEmpty || $0.name.hasPrefix(query) }
     }
     static func list(for provider: String) -> [PultCommand] {
-        (common + (provider == "claude" ? claude : codex)).sorted { $0.name < $1.name }
+        let all = common + (provider == "claude" ? claude : codex) + IntegratedCommandCatalog.entries(provider)
+        var seen = Set<String>()
+        return all.filter { seen.insert($0.name).inserted }.sorted { $0.name < $1.name }
     }
 }
 
@@ -58,7 +60,7 @@ struct SlashSuggestions: View {
     @ObservedObject var chat: Chat
     @ObservedObject var ui: UIState
     var matches: [PultCommand] {
-        PultCommand.matches(ui.draft, provider: chat.target)
+        chat.matchingCommands(ui.draft)
     }
     var body: some View {
         if !matches.isEmpty {

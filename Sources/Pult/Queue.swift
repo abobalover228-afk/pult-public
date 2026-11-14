@@ -31,6 +31,10 @@ struct MessageQueueView: View {
                         if !message.images.isEmpty { Text("Вложений: \(message.images.count)").foregroundColor(.secondary) }
                     }
                     Spacer()
+                    Button("Отправить сейчас") { chat.sendQueuedNow(message) }
+                        .buttonStyle(.borderless)
+                        .disabled(message.provider != chat.target || message.directory != chat.cwd || message.context != chat.queueContext)
+                        .help("Прервать текущий ответ и отправить это сообщение следующим")
                     Button("В поле") {
                         guard ui.draft.isEmpty else { return }
                         ui.draft = message.text; chat.attachments += message.images

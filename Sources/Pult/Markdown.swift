@@ -161,6 +161,7 @@ struct TextBlockView: View {
 
 struct MarkdownView: View {
     let text: String
+    var directory: String = homeDir
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(mdBlocks(text).enumerated()), id: \.offset) { _, b in
@@ -171,5 +172,8 @@ struct MarkdownView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .environment(\.openURL, OpenURLAction { url in
+            LocalFileLink.open(url, directory: directory) ? .handled : .systemAction
+        })
     }
 }

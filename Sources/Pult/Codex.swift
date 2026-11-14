@@ -5,8 +5,7 @@ let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
 let appDataDir = homeDir + "/Library/Application Support/PultPublic"
 let helperDir = Bundle.main.resourceURL!.appendingPathComponent("helpers").path + "/"
 func executable(_ name: String) -> String {
-    let env = ProcessInfo.processInfo.environment
-    let paths = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+    let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
     for dir in [homeDir + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"] + paths {
         let path = dir + "/" + name
         if FileManager.default.isExecutableFile(atPath: path) { return path }
@@ -19,6 +18,7 @@ let claudeBin = executable("claude")
 typealias JSON = [String: Any]
 
 final class CodexClient {
+    var requestTransport: ((JSON) -> Void)?
     let home: String
     private let proc = Process()
     private let input = Pipe(), output = Pipe()
@@ -67,7 +67,7 @@ final class CodexClient {
         }
     }
 
-    private func handle(_ o: JSON) {
+    func handle(_ o: JSON) {
         let params = (o["params"] as? JSON) ?? [:]
         if let m = o["method"] as? String {
             if let id = o["id"] { onServerRequest(id, m, params) } else { onNotification(m, params) }
@@ -77,6 +77,7 @@ final class CodexClient {
     }
 
     private func write(_ o: JSON) {
+        if let transport = requestTransport { transport(o); return }
         guard proc.isRunning, var d = try? JSONSerialization.data(withJSONObject: o) else { return }
         d.append(0x0A)
         input.fileHandleForWriting.write(d)
@@ -106,11 +107,11 @@ func loadAccounts() -> [Account] {
           let rows = (try? JSONSerialization.jsonObject(with: d)) as? [[String: String]] else {
         return [Account(name: "Codex", home: homeDir + "/.codex")]
     }
-    let accounts = rows.compactMap { r -> Account? in
+    let values = rows.compactMap { r -> Account? in
         guard let n = r["name"], let h = r["home"] else { return nil }
         return Account(name: n, home: (h as NSString).expandingTildeInPath)
     }
-    return accounts.isEmpty ? [Account(name: "Codex", home: homeDir + "/.codex")] : accounts
+    return values.isEmpty ? [Account(name: "Codex", home: homeDir + "/.codex")] : values
 }
 
 /// Файл диалога (rollout) по id — чтобы другой аккаунт продолжил тот же разговор.

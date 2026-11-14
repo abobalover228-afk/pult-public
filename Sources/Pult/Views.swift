@@ -17,7 +17,7 @@ func copyText(_ s: String) { NSPasteboard.general.clearContents(); NSPasteboard.
 struct ItemView: View {
     @ObservedObject var it: Item
     @ObservedObject var chat: Chat
-    var expanded: Bool { it.expanded }
+    var expanded: Bool { it.expanded || chat.expandedTools }
 
     var copyable: String {
         switch it.kind {
@@ -68,7 +68,7 @@ struct ItemView: View {
         case .agent:
             HStack(alignment: .top, spacing: 8) {
                 Text(it.claude ? "✳" : "⏺").foregroundColor(it.claude ? accent : .white)
-                MarkdownView(text: it.text)
+                MarkdownView(text: it.text, directory: chat.cwd)
             }
         case .command:
             VStack(alignment: .leading, spacing: 2) {
@@ -311,28 +311,38 @@ struct ChatView: View {
     @ObservedObject var chat: Chat
     @ObservedObject var proxy = Proxy.shared
     @StateObject private var ui = UIState()
+    @StateObject private var promptCoach = PromptCoach()
+    @ObservedObject private var apiStore = APIConnectionStore.shared
 
     func pct(_ a: Account) -> String { chat.remaining(a).map { "\(Int($0))%" } ?? "?" }
 
     var topBar: some View {
         HStack(spacing: 12) {
-            Button { chat.showSidebar.toggle() } label: { Image(systemName: "sidebar.left") }
+            Button { chat.showSidebar.toggle() } label: { PultIcon(symbol: "sidebar.left") }
+                .buttonStyle(PultIconStyle(selected: chat.showSidebar)).accessibilityLabel("Показать диалоги")
                 .keyboardShortcut("\\", modifiers: .command).help("Диалоги (⌘\\)")
             Text("✻ Пульт").bold().foregroundColor(accent)
             Text(chat.items.contains(where: { $0.kind == .question && $0.decision == nil }) ? "Ждёт ответа" : (chat.busy ? "● Работает" : "Готов"))
                 .font(monoSmall).foregroundColor(chat.busy ? .green : .secondary)
             Menu {
                 ForEach(Array(chat.accounts.enumerated()), id: \.offset) { i, a in
-                    Button((i == chat.current ? "● " : "   ") + a.name + " — осталось " + pct(a)) { chat.switchTo(i) }
+                    Button((chat.target == "codex" && i == chat.current ? "● " : "   ") + a.name + " — осталось " + pct(a)) { chat.chooseCodex(i) }.disabled(chat.busy || chat.nativeCLIIsRunning)
                 }
                 Divider()
                 Button("Войти / открыть аккаунт в терминале…") {
                     Terminal.run(shq(widgetDir + "open_codex.sh") + " " + shq(chat.account.home) + " " + shq(chat.account.name))
                 }
                 Button("Добавить аккаунт…") { Terminal.run(shq(widgetDir + "add_account.sh")) }
+                Button("Claude CLI") { chat.target = "claude" }.disabled(chat.busy || chat.nativeCLIIsRunning)
+                Divider()
+                ForEach(apiStore.connections) { connection in
+                    Button((chat.target == connection.target ? "● " : "") + connection.name + " · API") { chat.chooseAPI(connection) }.disabled(chat.busy || chat.nativeCLIIsRunning)
+                }
+                Button("Добавить / изменить API…") { chat.showAPIConnections = true }
+
                 Button("Обновить список и лимиты") { chat.accounts = loadAccounts(); chat.refreshAllLimits() }
             } label: {
-                Text(chat.connecting ? "подключаю…" : "\(chat.account.name) · \(pct(chat.account))")
+                Text(chat.connecting && !chat.isAPI ? "подключаю…" : chat.isAPI ? chat.connectionTitle + " · API" : "\(chat.connectionTitle) · \(pct(chat.account))")
             }
             .menuStyle(.borderlessButton).fixedSize()
             Spacer()
@@ -344,12 +354,16 @@ struct ChatView: View {
                     Button("Открыть разговор с Claude в Terminal") { chat.claudeInTerminal() }
                     Button("Начать с Claude заново (новый разговор)") { chat.resetClaude() }
                 }
-            Button { ui.showWallpaper.toggle() } label: { Image(systemName: "photo") }
+            Button { ui.showWallpaper.toggle() } label: { PultIcon(symbol: "photo") }
+                .buttonStyle(PultIconStyle(selected: ui.showWallpaper)).accessibilityLabel("Фон окна")
                 .help("Настроить фон")
                 .popover(isPresented: $ui.showWallpaper) {
                     WallpaperControls().padding(16).frame(width: 300)
                 }
-            Button("⚙︎") { ui.showSettings = true }
+            Button { NSWorkspace.shared.open(URL(fileURLWithPath: Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("Лимиты.app").path)) } label: { PultIcon(symbol: "gauge.with.dots.needle.50percent") }
+                .buttonStyle(PultIconStyle()).help("Показать лимиты аккаунтов").accessibilityLabel("Лимиты аккаунтов")
+            Button { ui.showSettings = true } label: { PultIcon(symbol: "slider.horizontal.3") }
+                .buttonStyle(PultIconStyle()).help("Настройки Пульта").accessibilityLabel("Настройки Пульта")
         }
         .buttonStyle(.borderless)
         .padding(.horizontal, 14).padding(.vertical, 9)
@@ -361,11 +375,12 @@ struct ChatView: View {
         let week = l?.week.map { "нед \(Int(100 - $0))%" } ?? "нед ?"
         let dir = chat.cwd.replacingOccurrences(of: homeDir, with: "~")
         return HStack(spacing: 10) {
-            Text(chat.account.name); Text("·"); Text(chat.model); Text("·"); Text(five); Text(week)
+            Text(chat.connectionTitle); Text("·"); Text(chat.isAPI ? (chat.selectedAPI?.model ?? "—") : chat.model); Text("·");
+            if chat.isAPI { Label("Квота API неизвестна", systemImage: "gauge.with.dots.needle.50percent") } else { Text(five); Text(week) }
             Text("·"); Text(dir).lineLimit(1).truncationMode(.middle)
             Spacer()
             if proxy.enabled { Text("VLESS").foregroundColor(proxy.status.hasPrefix("включён") ? .green : .orange) }
-            if chat.autoSwitch { Text("авто ⇄").foregroundColor(.secondary) }
+            if !chat.isAPI && chat.autoSwitch { Text("авто ⇄").foregroundColor(.secondary) }
         }
         .font(monoSmall).foregroundColor(.secondary)
         .padding(.horizontal, 16).padding(.bottom, 8)
@@ -386,7 +401,13 @@ struct ChatView: View {
                 Divider().opacity(0.3)
             }
             main
+            if promptCoach.isOpen {
+                Divider().opacity(0.3)
+                PromptCoachView(coach: promptCoach, chat: chat, ui: ui)
+            }
         }
+        .frame(minWidth: promptCoach.isOpen ? 1120 : 640)
+        .onDisappear { promptCoach.close() }
         .background(PultBackground())
         .preferredColorScheme(.dark)
     }
@@ -402,12 +423,12 @@ struct ChatView: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("✻ Добро пожаловать в Пульт").bold().foregroundColor(accent)
                                 Text("Codex на всех твоих аккаунтах. Кончится лимит — сам продолжит на другом.").foregroundColor(.secondary)
-                                Text("✳ Claude — отдать диалог Claude, если Codex тупит. Бот — состояние торгового бота.").foregroundColor(.secondary)
+                                Text("✳ Claude — отдать диалог Claude, если Codex тупит. API — через меню аккаунтов.").foregroundColor(.secondary)
                             }
                             .padding(12)
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.6), lineWidth: 1))
                         }
-                        ForEach(chat.items) { ItemView(it: $0, chat: chat).id($0.id) }
+                        ForEach(chat.items.filter { !chat.focusedConversation || [.user, .agent, .error, .question, .approval].contains($0.kind) }) { ItemView(it: $0, chat: chat).id($0.id) }
                         Color.clear.frame(height: 1).id("bottom")
                     }
                     .padding(16)
@@ -416,6 +437,14 @@ struct ChatView: View {
                 .onReceive(Timer.publish(every: 0.7, on: .main, in: .common).autoconnect()) { _ in
                     if chat.busy { sv.scrollTo("bottom") }
                 }
+            }
+            if chat.nativeCLIIsRunning {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Выполняется команда CLI…").font(monoSmall)
+                    Button("Остановить") { chat.interrupt() }.buttonStyle(.borderless)
+                    Spacer()
+                }.padding(.horizontal, 16).padding(.bottom, 6)
             }
             if chat.busy, let s = chat.turnStarted { Spinner(start: s).padding(.horizontal, 16).padding(.bottom, 6).frame(maxWidth: .infinity, alignment: .leading) }
             if !chat.attachments.isEmpty {
@@ -432,41 +461,48 @@ struct ChatView: View {
             }
             HStack(alignment: .top, spacing: 8) {
                 Button {
-                    chat.target = chat.target == "claude" ? "codex" : "claude"
+                    if !chat.busy && !chat.nativeCLIIsRunning { chat.target = chat.target == "claude" ? "codex" : "claude" }
                 } label: {
-                    ProviderIcon(claude: chat.target == "claude")
+                    Group { if chat.isAPI { PultIcon(symbol: "network") } else { ProviderIcon(claude: chat.target == "claude") } }
                         .frame(width: 24, height: 24).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help(chat.target == "claude" ? "Claude → GPT" : "GPT → Claude")
-                Button { pickImages(chat) } label: { Image(systemName: "paperclip") }.buttonStyle(.borderless).help("Картинка (или перетащи / ⇧⌘V)")
+                Button { pickImages(chat) } label: { PultIcon(symbol: "paperclip") }.buttonStyle(PultIconStyle()).help("Картинка (или перетащи / ⇧⌘V)")
+                Button {
+                    promptCoach.open(draft: ui.draft, chat: chat)
+                } label: { PultIcon(symbol: "wand.and.stars") }
+                .buttonStyle(PultIconStyle(selected: promptCoach.isOpen))
+                .accessibilityLabel("Улучшить промпт")
+                .help("Суперпромпт: прочитать диалог, уточнить и улучшить запрос")
+                .disabled(ui.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || chat.busy || chat.connecting || chat.nativeCLIIsRunning)
                 Text(">").foregroundColor(chat.target == "claude" ? accent : .secondary)
-                TextField(chat.busy ? "добавить в очередь…" : (chat.target == "claude" ? "Напиши Claude…" : "Напиши задачу…"), text: $ui.draft, axis: .vertical)
+                TextField(chat.busy ? "добавить в очередь…" : (chat.isAPI ? "Напиши в API…" : chat.target == "claude" ? "Напиши Claude…" : "Напиши задачу…"), text: $ui.draft, axis: .vertical)
                     .textFieldStyle(.plain).lineLimit(1...10)
                     .onChange(of: ui.draft) { _ in ui.slashSelection = 0; ui.slashDismissed = false }
                     .onKeyPress(.tab) {
                         guard ui.draft.hasPrefix("/"), !ui.draft.contains(where: { $0.isWhitespace }) else { return .ignored }
-                        let matches = PultCommand.matches(ui.draft, provider: chat.target)
+                        let matches = chat.matchingCommands(ui.draft)
                         guard !matches.isEmpty else { return .ignored }
                         ui.draft = "/" + matches[min(ui.slashSelection, matches.count - 1)].name + " "
                         return .handled
                     }
                     .onKeyPress(.downArrow) {
                         guard ui.draft.hasPrefix("/"), !ui.slashDismissed else { return .ignored }
-                        let count = PultCommand.matches(ui.draft, provider: chat.target).count
+                        let count = chat.matchingCommands(ui.draft).count
                         guard count > 0 else { return .ignored }
                         ui.slashSelection = (ui.slashSelection + 1) % count
                         return .handled
                     }
                     .onKeyPress(.upArrow) {
                         guard ui.draft.hasPrefix("/"), !ui.slashDismissed else { return .ignored }
-                        let count = PultCommand.matches(ui.draft, provider: chat.target).count
+                        let count = chat.matchingCommands(ui.draft).count
                         guard count > 0 else { return .ignored }
                         ui.slashSelection = (ui.slashSelection + count - 1) % count
                         return .handled
                     }
                     .onSubmit {
-                        let matches = PultCommand.matches(ui.draft, provider: chat.target)
+                        let matches = chat.matchingCommands(ui.draft)
                         let exact = matches.contains { ui.draft == "/" + $0.name }
                         if !matches.isEmpty, !exact, !ui.slashDismissed {
                             ui.draft = "/" + matches[min(ui.slashSelection, matches.count - 1)].name + " "
@@ -494,7 +530,7 @@ struct ChatView: View {
                 let input = chat.target == "claude" ? chat.claudeInputTokens : chat.codexInputTokens
                 let output = chat.target == "claude" ? chat.claudeOutputTokens : chat.codexOutputTokens
                 let cached = chat.target == "claude" ? chat.claudeCachedTokens : chat.codexCachedTokens
-                Text((chat.target == "claude" ? "Токены хода · вход: " : "Токены диалога · вход: ") + (input.map(String.init) ?? "—"))
+                Text((chat.isAPI ? "Токены API-запроса · вход: " : chat.target == "claude" ? "Токены хода · вход: " : "Токены диалога · вход: ") + (input.map(String.init) ?? "—"))
                 Text("выход: " + (output.map(String.init) ?? "—"))
                 Text("кэш: " + (cached.map(String.init) ?? "—"))
                 Spacer()
@@ -516,7 +552,14 @@ struct ChatView: View {
             }
             return true
         }
+        .onChange(of: apiStore.revision) { _ in chat.apiConfigurationDidChange() }
+        .sheet(isPresented: $chat.showAPIConnections) { APIConnectionsView(store: apiStore, onSelect: { chat.chooseAPI($0) }, canSelect: !chat.busy && !chat.nativeCLIIsRunning) }
         .onChange(of: chat.showCommandSettings) { show in if show { ui.showSettings = true; chat.showCommandSettings = false } }
+        .sheet(isPresented: $chat.showModelChoices) { ModelChoicesView(chat: chat) }
+        .sheet(isPresented: $chat.showClaudeConversations) { ClaudeConversationsView(chat: chat) }
+        .alert(item: $chat.pendingNativeAction) { action in
+            Alert(title: Text(action.title), message: Text(action.message), primaryButton: .destructive(Text("Выполнить")) { action.perform() }, secondaryButton: .cancel())
+        }
         .sheet(isPresented: $ui.showSettings) { SettingsView(chat: chat, close: { ui.showSettings = false }) }
     }
 }

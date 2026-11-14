@@ -65,12 +65,31 @@ final class Chat: ObservableObject {
     @Published var items: [Item] = []
     @Published var busy = false
     @Published var connecting = false
+    @Published var showAPIConnections = false
+    var apiConnectionStore = APIConnectionStore.shared
+    var apiClient: APIChatTransport?
+    var makeAPIClient: () -> APIChatTransport = { CompatibleAPIClient() }
+    var apiGeneration = UUID()
+    var apiConversationID: UUID?
     @Published var accounts = loadAccounts()
     @Published var current = 0
     @Published var limits: [String: Limits] = [:]          // по CODEX_HOME
     @Published var model = "gpt-6.1-sol"
     @Published var claudeModel = ""
     @Published var showCommandSettings = false
+    @Published var showModelChoices = false
+    @Published var modelChoices: [ModelChoice] = []
+    @Published var showClaudeConversations = false
+    @Published var claudeConversations: [ClaudeConversation] = []
+    @Published var reasoningEffort: String? = nil
+    @Published var claudeEffort: String? = nil
+    @Published var claudePermissionMode = "auto"
+    @Published var claudeCommands: [PultCommand] = []
+    @Published var pendingNativeAction: PendingNativeAction? = nil
+    @Published var nativeCLIIsRunning = false
+    var nativeCLIProcess: Process?
+    @Published var expandedTools = false
+    @Published var focusedConversation = false
     @Published var claudeUsage = "Пока нет завершённых ходов."
     @Published var codexInputTokens: Int? = nil
     @Published var codexOutputTokens: Int? = nil
@@ -87,17 +106,21 @@ final class Chat: ObservableObject {
     @Published var autoApprove = UserDefaults.standard.object(forKey: "autoApprove") as? Bool ?? false {
         didSet { UserDefaults.standard.set(autoApprove, forKey: "autoApprove") }
     }
-    @Published var target = "codex"                     // кому пишем: codex / claude
+    @Published var target = UserDefaults.standard.string(forKey: "selectedConnection") ?? "codex" {
+        didSet { UserDefaults.standard.set(target, forKey: "selectedConnection") }
+    }
     @Published var pendingMessages: [QueuedMessage] = []
     @Published var queuePaused = false
     var queueContext = UUID()
+    var immediateQueuedID: UUID?
     @Published var attachments: [String] = []           // пути картинок к следующему сообщению
+    var claudeForkFrom: String?
     private var claudeProc: Process?
     private var claudeItems: [String: Item] = [:]
     private var claudeText: Item?
     var autoSwitch = true
 
-    private var client: CodexClient?
+    var client: CodexClient?
     @Published private(set) var threadId: String?
     @Published var threads: [ThreadInfo] = []
     @Published var showSidebar = UserDefaults.standard.object(forKey: "sidebar") as? Bool ?? true {
@@ -111,7 +134,10 @@ final class Chat: ObservableObject {
 
     var account: Account { accounts[min(current, accounts.count - 1)] }
 
-    init(connectImmediately: Bool = true) { if connectImmediately { connect(bestAccount()); loadThreads() } }
+    init(connectImmediately: Bool = true) {
+        if isAPI && selectedAPI == nil { target = "codex" }
+        if connectImmediately { if !isAPI { connect(bestAccount()) }; loadThreads() }
+    }
 
     // MARK: список диалогов
 
@@ -136,12 +162,16 @@ final class Chat: ObservableObject {
                 let (title, cwd) = threadTitle(v.path, v.date)
                 return ThreadInfo(id: tid, path: v.path, title: title, date: v.date, account: v.account, cwd: cwd)
             }
-            DispatchQueue.main.async { self.threads = Array(list) }
+            let apiThreads = APIHistory.threads()
+            DispatchQueue.main.async { self.threads = (Array(list) + apiThreads).sorted { $0.date > $1.date } }
         }
     }
 
     /// Открыть прошлый диалог на текущем аккаунте и показать историю.
     func open(_ t: ThreadInfo) {
+        if t.id.hasPrefix("api:") { openAPI(t); return }
+        if isAPI && busy { add(.note, "Сначала останови API-ответ."); return }
+        if isAPI { target = "codex" }
         guard let c = client, t.id != threadId else { return }
         queueContext = UUID()
         codexInputTokens = nil; codexOutputTokens = nil; codexCachedTokens = nil
@@ -235,7 +265,7 @@ final class Chat: ObservableObject {
         var best = bestAccount()
         if let f = ProcessInfo.processInfo.environment["PULT_ACCOUNT"].flatMap(Int.init), accounts.indices.contains(f) { best = f }
         let forced = ProcessInfo.processInfo.environment["PULT_ACCOUNT"] != nil
-        if autoSwitch, threadId == nil, !busy, best != current, forced || (remaining(accounts[best]) ?? 0) > (remaining(account) ?? 0) {
+        if target == "codex", autoSwitch, threadId == nil, !busy, best != current, forced || (remaining(accounts[best]) ?? 0) > (remaining(account) ?? 0) {
             connect(best) { [weak self] in self?.autotest() }
         } else { autotest() }
     }
@@ -288,6 +318,7 @@ final class Chat: ObservableObject {
         }
         c.onExit = { [weak self, weak c] in
             guard let self = self, c === self.client else { return }
+            guard self.target == "codex" else { return }
             self.busy = false; self.connecting = false
             self.add(.error, "Codex (\(self.account.name)) завершился. Выбери аккаунт заново.")
         }
@@ -319,6 +350,8 @@ final class Chat: ObservableObject {
     // MARK: диалог
 
     func newChat() {
+        apiGeneration = UUID(); apiClient?.cancel(); apiClient = nil; apiConversationID = nil
+        if isAPI { busy = false }
         queueContext = UUID()
         codexInputTokens = nil; codexOutputTokens = nil; codexCachedTokens = nil
         claudeInputTokens = nil; claudeOutputTokens = nil; claudeCachedTokens = nil
@@ -329,13 +362,15 @@ final class Chat: ObservableObject {
 
     func send(_ text: String, echo: Bool = true) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if handleAPISlash(t) { return }
         if handleSlash(t) { return }
         guard !t.isEmpty || !attachments.isEmpty else { return }
-        if busy || (target == "claude" && claudeProc?.isRunning == true) || (connecting && target == "codex") {
+        if busy || nativeCLIIsRunning || (target == "claude" && claudeProc?.isRunning == true) || (connecting && target == "codex") {
             pendingMessages.append(QueuedMessage(text: t, images: attachments, provider: target, directory: cwd, context: queueContext))
             attachments = []
             return
         }
+        if isAPI { sendAPI(t, echo: echo); return }
         if target == "claude" { sendClaude(t, echo: echo); return }
         let imgs = attachments
         guard !t.isEmpty || !imgs.isEmpty, let c = client else { return }
@@ -349,13 +384,15 @@ final class Chat: ObservableObject {
         triedThisTurn = [current]
         withThread { [weak self] tid in
             guard let self = self, let tid = tid else { self?.busy = false; return }
-            self.client?.call("turn/start", ["threadId": tid, "model": self.model, "input": input]) { r in
+            var params: JSON = ["threadId": tid, "model": self.model, "input": input]
+            if let effort = self.reasoningEffort { params["effort"] = effort }
+            self.client?.call("turn/start", params) { r in
                 if let e = r["error"] as? JSON { self.busy = false; self.add(.error, (e["message"] as? String) ?? "turn/start: ошибка") }
             }
         }
     }
 
-    private func withThread(_ cb: @escaping (String?) -> Void) {
+    func withThread(_ cb: @escaping (String?) -> Void) {
         guard let c = client else { cb(nil); return }
         let common: JSON = ["cwd": cwd, "approvalPolicy": "on-request", "sandbox": sandbox, "model": model]
         if let tid = threadId, threadLoaded { cb(tid); return }
@@ -378,14 +415,26 @@ final class Chat: ObservableObject {
 
     func resumeQueue() { queuePaused = false; drainQueue() }
 
+    func sendQueuedNow(_ message: QueuedMessage) {
+        guard message.provider == target, message.directory == cwd, message.context == queueContext else { return }
+        guard let index = pendingMessages.firstIndex(where: { $0.id == message.id }) else { return }
+        pendingMessages.insert(pendingMessages.remove(at: index), at: 0)
+        immediateQueuedID = message.id
+        if busy || nativeCLIIsRunning || claudeProc?.isRunning == true { interrupt() }
+        else { queuePaused = false; drainQueue() }
+    }
+
     func drainQueue() {
-        guard !busy, !queuePaused, !connecting, !pendingMessages.isEmpty,
+        if let id = immediateQueuedID, !busy, !nativeCLIIsRunning, claudeProc?.isRunning != true,
+           pendingMessages.first?.id == id { queuePaused = false }
+        guard !busy, !nativeCLIIsRunning, !queuePaused, !connecting, !pendingMessages.isEmpty,
               !items.contains(where: { $0.kind == .question && $0.decision == nil }),
               claudeProc?.isRunning != true else { return }
         let next = pendingMessages[0]
         guard next.provider == target, next.directory == cwd, next.context == queueContext else { return }
         if next.provider == "codex", client == nil { return }
         pendingMessages.removeFirst()
+        if immediateQueuedID == next.id { immediateQueuedID = nil }
         let savedAttachments = attachments
         attachments = next.images
         send(next.text)
@@ -394,6 +443,8 @@ final class Chat: ObservableObject {
 
     func interrupt() {
         queuePaused = true
+        if isAPI { apiGeneration = UUID(); apiClient?.cancel(); apiClient = nil; busy = false; add(.note, "API-запрос остановлен. Провайдер мог уже начать обработку."); return }
+        if let process = nativeCLIProcess, process.isRunning { process.terminate(); return }
         if let p = claudeProc, p.isRunning { p.terminate(); return }
         guard let tid = threadId, let turn = turnId else { return }
         client?.call("turn/interrupt", ["threadId": tid, "turnId": turn])
@@ -487,7 +538,9 @@ final class Chat: ObservableObject {
         if let e = err, let msg = e["message"] as? String, turn["status"] as? String != "interrupted" { add(.error, msg) }
         if turn["status"] as? String == "interrupted" { add(.note, "Прервано.") }
         if err != nil || turn["status"] as? String == "interrupted" { queuePaused = true }
-        else { DispatchQueue.main.async { [weak self] in self?.drainQueue() } }
+        if immediateQueuedID != nil || (err == nil && turn["status"] as? String != "interrupted") {
+            DispatchQueue.main.async { [weak self] in self?.drainQueue() }
+        }
         if took > 60 { notifyDone(took, failed: err != nil) }
         // Заранее: если осталось меньше 5% — следующий ход пойдёт на другом аккаунте.
         if autoSwitch, let r = remaining(account), r < 5 {
@@ -640,7 +693,7 @@ final class Chat: ObservableObject {
         Terminal.run("cd \(shq(cwd)) && claude " + (sid.resume ? "--resume " : "--session-id ") + sid.id)
     }
 
-    private func claudeSession() -> (id: String, resume: Bool) {
+    func claudeSession() -> (id: String, resume: Bool) {
         let key = "claudeSession:" + cwd
         if let sid = UserDefaults.standard.string(forKey: key), claudeSessionExists(sid) { return (sid, true) }
         let sid = UUID().uuidString.lowercased()
@@ -659,8 +712,13 @@ final class Chat: ObservableObject {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: claudeBin)
         p.arguments = ["-p", t, "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-                       "--permission-mode", "auto", sid.resume ? "--resume" : "--session-id", sid.id]
+                       "--permission-mode", claudePermissionMode, sid.resume ? "--resume" : "--session-id", sid.id]
+        if let original = claudeForkFrom {
+            p.arguments = ["-p", t, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", claudePermissionMode, "--resume", original, "--fork-session", "--session-id", sid.id]
+            claudeForkFrom = nil
+        }
         if !claudeModel.isEmpty { p.arguments? += ["--model", claudeModel] }
+        if let effort = claudeEffort { p.arguments? += ["--effort", effort] }
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = homeDir + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
@@ -693,6 +751,10 @@ final class Chat: ObservableObject {
 
     private func claudeEvent(_ o: JSON) {
         switch o["type"] as? String {
+        case "system":
+            if o["subtype"] as? String == "init", let commands = o["slash_commands"] as? [String] {
+                claudeCommands = commands.map { PultCommand(name: $0, detail: "Навык установленного Claude Code") }
+            }
         case "stream_event":
             let ev = (o["event"] as? JSON) ?? [:]
             if ev["type"] as? String == "content_block_start", let b = ev["content_block"] as? JSON {
@@ -796,10 +858,12 @@ extension Chat {
     @discardableResult func handleSlash(_ text: String) -> Bool {
         guard text.hasPrefix("/") else { return false }
         let parts = text.dropFirst().split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
-        let command = parts.first.map(String.init)?.lowercased() ?? "help"
+        let rawCommand = parts.first.map(String.init)?.lowercased() ?? "help"
+        let aliases = ["reset": "clear", "cwd": "pwd", "settings": "config", "stats": "usage", "peers": "list-agents", "bg": "background", "clean": "stop", "pet": "pets"]
+        let command = aliases[rawCommand] ?? rawCommand
         let argument = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
         let claude = target == "claude"
-        let available = PultCommand.list(for: target)
+        let available = commandList
         // Absolute paths can start a normal prompt; only known commands are intercepted.
         if !available.contains(where: { $0.name == command }) {
             if command.contains("/") { return false }
@@ -811,6 +875,7 @@ extension Chat {
             add(.note, "Сначала дождись ответа или прерви его через /stop.")
             return true
         }
+        if handleIntegratedCommand(command, argument: argument) { return true }
         switch command {
         case "help":
             add(.note, available.map { "/\($0.name) — \($0.detail)" }.joined(separator: "\n"))
@@ -820,7 +885,7 @@ extension Chat {
         case "stop": interrupt()
         case "config", "permissions": showCommandSettings = true
         case "model":
-            if argument.isEmpty { showCommandSettings = true }
+            if argument.isEmpty { if claude { showCommandSettings = true } else { showModelPicker() } }
             else {
                 if claude { claudeModel = argument } else { model = argument }
                 add(.note, "Модель: " + argument)
@@ -832,8 +897,10 @@ extension Chat {
             if claude { add(.note, "Последний ход:\n" + claudeUsage + "\nКвоты подписки Claude недоступны через режим print.") }
             else { slashRPC("account/rateLimits/read") }
         case "copy":
-            if let item = items.last(where: { $0.kind == .agent && !$0.text.isEmpty }) { copyText(item.text); add(.note, "Ответ скопирован.") }
-            else { add(.note, "Пока нет ответа для копирования.") }
+            let responses = items.filter { $0.kind == .agent && !$0.text.isEmpty }.reversed()
+            let number = Int(argument) ?? 1
+            if number > 0, number <= responses.count { copyText(Array(responses)[number - 1].text); add(.note, "Ответ скопирован.") }
+            else { add(.note, "Ответ с этим номером не найден. /copy 1 — последний ответ.") }
         case "export":
             let panel = NSSavePanel(); panel.nameFieldStringValue = "Диалог.md"
             if panel.runModal() == .OK, let url = panel.url {
@@ -852,6 +919,7 @@ extension Chat {
                 } else { add(.error, "Папка не найдена: " + url.path) }
             }
         case "resume":
+            if claude { showClaudeResume(argument); return true }
             showSidebar = true; loadThreads()
             if !argument.isEmpty {
                 if let thread = threads.first(where: { $0.id == argument }) { open(thread) }
@@ -865,16 +933,12 @@ extension Chat {
         case "init":
             let prompt = "Изучи этот проект и создай или актуализируй \(claude ? "CLAUDE.md" : "AGENTS.md") с краткими инструкциями по разработке, сборке и проверке."
             if claude { sendClaude(prompt) } else { send(prompt) }
-        case "skills":
-            if claude { listClaudeFiles("skills") } else { slashRPC("skills/list", ["cwds": [cwd]]) }
-        case "mcp":
-            if claude { runInlineCLI(claudeBin, ["mcp", "list"]) }
-            else { slashRPC("mcpServerStatus/list", ["limit": 100]) }
-        case "plugins", "plugin":
-            if claude { runInlineCLI(claudeBin, ["plugin", "list"]) }
-            else { slashRPC("plugin/list", ["cwds": [cwd]]) }
-        case "apps": slashRPC("apps/list", ["limit": 100])
-        case "agents": listClaudeFiles("agents")
+        case "skills": handleSkills(argument)
+        case "mcp": handleMCP(argument)
+        case "plugins", "plugin": handlePlugins(argument)
+        case "apps": slashRPC("app/list", [:])
+        case "agents":
+            if claude { listClaudeFiles("agents") } else { slashRPC("thread/loaded/list", ["limit": 100]) }
         case "memory":
             let url = URL(fileURLWithPath: cwd).appendingPathComponent("CLAUDE.md")
             if FileManager.default.fileExists(atPath: url.path) { NSWorkspace.shared.open(url) }
@@ -918,7 +982,7 @@ extension Chat {
         return true
     }
 
-    private func slashRPC(_ method: String, _ params: JSON = [:], success: String? = nil) {
+    func slashRPC(_ method: String, _ params: JSON = [:], success: String? = nil) {
         guard let client = client else { add(.error, "Codex ещё не подключён."); return }
         client.call(method, params) { [weak self] response in
             guard let self = self else { return }
@@ -930,7 +994,7 @@ extension Chat {
         }
     }
 
-    private func listClaudeFiles(_ folder: String) {
+    func listClaudeFiles(_ folder: String) {
         var entries: [String] = []
         for base in [homeDir + "/.claude/", cwd + "/.claude/"] {
             let root = base + folder
@@ -939,25 +1003,40 @@ extension Chat {
         add(.note, entries.isEmpty ? "Нет локальных \(folder) в ~/.claude и .claude проекта." : entries.sorted().joined(separator: "\n"))
     }
 
-    private func runInlineCLI(_ executable: String, _ arguments: [String]) {
+    func runInlineCLI(_ executable: String, _ arguments: [String]) {
+        guard !nativeCLIIsRunning else { add(.note, "Уже выполняется команда CLI. /stop — остановить."); return }
         let item = add(.command, ([URL(fileURLWithPath: executable).lastPathComponent] + arguments).joined(separator: " "))
-        let directory = cwd, accountHome = account.home
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable); process.arguments = arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
         var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_HOME"] = accountHome
+        environment["CODEX_HOME"] = account.home
         environment["PATH"] = homeDir + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (environment["PATH"] ?? "")
         environment.merge(Proxy.shared.env) { _, new in new }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process(); process.executableURL = URL(fileURLWithPath: executable); process.arguments = arguments
-            process.currentDirectoryURL = URL(fileURLWithPath: directory); process.environment = environment
-            let output = Pipe(); process.standardOutput = output; process.standardError = output; process.standardInput = FileHandle.nullDevice
-            do {
-                try process.run()
-                DispatchQueue.global().asyncAfter(deadline: .now() + 30) { if process.isRunning { process.terminate() } }
-                let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
-                let text = String(decoding: data.suffix(20000), as: UTF8.self)
-                DispatchQueue.main.async { item.output = text.isEmpty ? "Готово." : text; item.exitCode = Int(process.terminationStatus); item.done = true }
-            } catch {
-                DispatchQueue.main.async { item.output = error.localizedDescription; item.exitCode = 1; item.done = true }
+        process.environment = environment
+        let output = Pipe(); process.standardOutput = output; process.standardError = output; process.standardInput = FileHandle.nullDevice
+        do { try process.run() }
+        catch { item.output = error.localizedDescription; item.exitCode = 1; item.done = true; return }
+        nativeCLIProcess = process; nativeCLIIsRunning = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var accumulated = Data()
+            while true {
+                let data = output.fileHandleForReading.availableData
+                if data.isEmpty { break }
+                accumulated.append(data)
+                if accumulated.count > 100000 { accumulated = Data(accumulated.suffix(100000)) }
+                let text = String(decoding: accumulated, as: UTF8.self)
+                DispatchQueue.main.async { item.output = text }
+            }
+            process.waitUntilExit()
+            let text = String(decoding: accumulated, as: UTF8.self)
+            DispatchQueue.main.async {
+                item.output = text.isEmpty ? "Команда завершилась без вывода." : text
+                item.exitCode = Int(process.terminationStatus); item.done = true
+                if self?.nativeCLIProcess === process {
+                    self?.nativeCLIProcess = nil; self?.nativeCLIIsRunning = false
+                    self?.drainQueue()
+                }
             }
         }
     }
