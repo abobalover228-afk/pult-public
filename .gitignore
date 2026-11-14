@@ -12,3 +12,11 @@ xray.json
 .codex*/
 Apps/
 accounts.json
+connections.json
+history/
+*.keychain*
+.codex-accounts.json
+*.pem
+*.key
+*.p12
+.swiftpm/
