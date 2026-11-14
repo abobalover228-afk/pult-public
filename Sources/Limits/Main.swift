@@ -1,6 +1,6 @@
 // Лимиты — виджет на рабочем столе: Claude Code + три аккаунта Codex.
 // Claude: ~/.claude/limits-cache.json (пишет строка состояния Claude Code).
-// Codex: встроенный helpers/limits.py --json. Только чтение.
+// Codex: встроенный read-only helper.
 import AppKit
 import SwiftUI
 
@@ -84,23 +84,27 @@ func parseCodex(_ name: String, _ d: [String: Any]?, home: String? = nil) -> Acc
 }
 
 func readClaude() -> Account {
-    guard let data = FileManager.default.contents(atPath: claudeCache),
-          let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let rl = j["rate_limits"] as? [String: Any] else {
-        return Account(name: "Claude", note: "откроется после запуска Claude Code", windows: [])
-    }
-    var ws: [Window] = []
-    for (key, title) in [("five_hour", "5 часов"), ("seven_day", "неделя")] {
-        if let w = rl[key] as? [String: Any], let used = w["used_percentage"] as? Double {
-            ws.append(Window(name: title, left: max(0, 100 - used), resets: w["resets_at"] as? Double))
-        }
-    }
-    let age = Date().timeIntervalSince1970 - ((j["saved_at"] as? Double) ?? 0)
-    let note = age < 120 ? "сейчас" : "данные \(Int(age / 60)) мин назад"
-    return Account(name: "Claude", note: note, windows: ws)
+    let snapshot = ClaudeCacheSnapshot.parse(FileManager.default.contents(atPath: claudeCache))
+    return Account(name: "Claude", note: snapshot.message,
+                   windows: snapshot.fresh ? snapshot.windows.map { Window(name: $0.0, left: $0.1, resets: $0.2) } : [])
+}
+func openClaudeUsage() {
+    inTerminal("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; cd \"$HOME\"; claude /usage")
+}
+
+struct WidgetAPIConnection: Decodable { let id: UUID; let name: String; let model: String }
+func readAPIConnections() -> [WidgetAPIConnection] {
+    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/PultConnections/connections.json")
+    guard let data = try? Data(contentsOf: url) else { return [] }
+    return (try? JSONDecoder().decode([WidgetAPIConnection].self, from: data)) ?? []
+}
+func openAPIManager(_ id: UUID? = nil) {
+    let value = id.map { "pultpublic://api?id=" + $0.uuidString } ?? "pultpublic://connections"
+    NSWorkspace.shared.open(URL(string: value)!)
 }
 
 final class Model: ObservableObject {
+    @Published var apiConnections = readAPIConnections()
     @Published var claude = readClaude()
     @Published var codex: [Account] = {
         let path = home + "/.codex-accounts.json"
@@ -113,12 +117,15 @@ final class Model: ObservableObject {
     }()
     @Published var updated: Date? = nil
     @Published var loading = false
+    @Published var claudeNotice: String?
+    func refreshAll() { refreshClaude(); claudeNotice = "Кеш перечитан. Свежую квоту выдаёт работающий Claude Code; для штатной проверки откройте /usage. Перечитывание не обновляет время получения."; refreshCodex() }
 
-    func refreshClaude() { claude = readClaude() }
+    func refreshClaude() { claude = readClaude(); apiConnections = readAPIConnections() }
 
     func refreshCodex() {
         if loading { return }
         loading = true
+        apiConnections = readAPIConnections()
         DispatchQueue.global().async {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: python)
@@ -170,7 +177,7 @@ struct AccountView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(a.name).font(.system(size: 13, weight: .semibold))
                 Spacer()
-                if let n = a.note { Text(n).font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1) }
+                if let n = a.note { Text(n).font(.system(size: 10)).foregroundColor(.secondary).multilineTextAlignment(.trailing).fixedSize(horizontal: false, vertical: true) }
             }
             ForEach(a.windows) { w in
                 VStack(alignment: .leading, spacing: 2) {
@@ -191,10 +198,11 @@ struct AccountView: View {
 
 struct WidgetView: View {
     @ObservedObject var m: Model
+    @ObservedObject private var hidden = HiddenWidgetAccounts.shared
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             HStack {
-                Text("Лимиты").font(.system(size: 15, weight: .bold))
+                Image(systemName: "gauge.with.dots.needle.50percent").font(.system(size: 16, weight: .medium)).accessibilityLabel("Лимиты аккаунтов").help("Остатки и время сброса лимитов")
                 Spacer()
                 if m.loading { ProgressView().scaleEffect(0.45).frame(width: 12, height: 12) }
                 else if let u = m.updated {
@@ -205,10 +213,17 @@ struct WidgetView: View {
                 Button("Открыть") { openAccountsWindow() }
                     .buttonStyle(.borderless).font(.system(size: 11, weight: .semibold)).foregroundColor(.accentColor)
             }
-            AccountView(a: m.claude)
-            ForEach(m.codex) { a in
+            if !hidden.contains("claude") {
+                AccountView(a: m.claude)
+                Button("Проверить в Claude Code…") { openClaudeUsage() }.font(.caption).buttonStyle(.borderless).help("Открыть штатную /usage без модельного запроса")
+            }
+            ForEach(m.codex.filter { !hidden.contains(HiddenWidgetAccounts.codex(home: $0.home, name: $0.name)) }) { a in
                 Divider().opacity(0.4)
                 AccountView(a: a)
+            }
+            ForEach(m.apiConnections.filter { !hidden.contains("api:" + $0.id.uuidString) }, id: \.id) { connection in
+                Divider().opacity(0.4)
+                HStack { VStack(alignment: .leading) { Text(connection.name).font(.system(size: 13, weight: .semibold)); Text(connection.model + " · квота неизвестна").font(.caption2).foregroundColor(.secondary) }; Spacer(); Button { openAPIManager(connection.id) } label: { Image(systemName: "arrow.up.right.square") }.buttonStyle(.borderless).help("Выбрать API в Пульте").accessibilityLabel("Открыть " + connection.name + " в Пульте") }
             }
             Button { MapWindow.shared.show() } label: {
                 Image(systemName: "point.3.connected.trianglepath.dotted")
@@ -225,8 +240,9 @@ struct WidgetView: View {
 
 struct AccountsView: View {
     @ObservedObject var m: Model
+    @ObservedObject private var hidden = HiddenWidgetAccounts.shared
     func best() -> Account? {
-        m.codex.filter { $0.home != nil && !$0.windows.isEmpty }
+        m.codex.filter { !hidden.contains(HiddenWidgetAccounts.codex(home: $0.home, name: $0.name)) }.filter { $0.home != nil && !$0.windows.isEmpty }
             .max { ($0.windows.compactMap(\.left).min() ?? 0) < ($1.windows.compactMap(\.left).min() ?? 0) }
     }
     var body: some View {
@@ -234,8 +250,10 @@ struct AccountsView: View {
             HStack {
                 Text("Аккаунты Codex").font(.title2.bold())
                 Spacer()
-                Button("Обновить") { m.refreshCodex() }
+                Button("Обновить") { m.refreshAll() }
             }
+            if let notice = m.claudeNotice { Text(notice).font(.caption).foregroundColor(.secondary) }
+            if !hidden.keys.isEmpty { Button("Вернуть скрытые записи (\(hidden.keys.count))") { hidden.restoreAll() } }
             Button {
                 inTerminal("python3 " + q(widgetDir + "codex_switch.py"))
             } label: {
@@ -244,10 +262,17 @@ struct AccountsView: View {
             }.controlSize(.large).buttonStyle(.borderedProminent)
             ScrollView {
                 VStack(spacing: 10) {
-                    AccountView(a: m.claude).padding(12).background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.05)))
-                    ForEach(m.codex) { a in
+                    if !hidden.contains("claude") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            AccountView(a: m.claude)
+                            Button("Проверить в Claude Code…") { openClaudeUsage() }
+                            HideWidgetAccountButton(hidden: hidden, key: "claude", name: "Claude")
+                        }.padding(12)
+                    }
+                    ForEach(m.codex.filter { !hidden.contains(HiddenWidgetAccounts.codex(home: $0.home, name: $0.name)) }) { a in
                         HStack(alignment: .top, spacing: 12) {
                             AccountView(a: a)
+                            HideWidgetAccountButton(hidden: hidden, key: HiddenWidgetAccounts.codex(home: a.home, name: a.name), name: a.name)
                             if let h = a.home {
                                 Button(a.loggedIn ? "Открыть" : "Войти") {
                                     inTerminal(q(widgetDir + "open_codex.sh") + " " + q((h as NSString).expandingTildeInPath) + " " + q(a.name))
@@ -257,10 +282,19 @@ struct AccountsView: View {
                         .padding(12)
                         .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.05)))
                     }
+                    ForEach(m.apiConnections.filter { !hidden.contains("api:" + $0.id.uuidString) }, id: \.id) { connection in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) { Text(connection.name).bold(); Text(connection.model + " · квота API неизвестна").font(.caption).foregroundColor(.secondary) }
+                            Spacer()
+                            HideWidgetAccountButton(hidden: hidden, key: "api:" + connection.id.uuidString, name: connection.name)
+                            Button("Выбрать") { openAPIManager(connection.id) }
+                        }.padding(12).background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.05)))
+                    }
                 }
             }
             HStack {
                 Button { inTerminal(q(widgetDir + "add_account.sh")) } label: { Label("Добавить аккаунт", systemImage: "plus") }
+                Button { openAPIManager() } label: { Label("API-подключения…", systemImage: "network") }
                 Spacer()
                 if let b = best() { Text("Больше всего лимита: \(b.name)").font(.caption).foregroundColor(.secondary) }
             }
@@ -320,7 +354,10 @@ final class App: NSObject, NSApplicationDelegate {
         timers.append(Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in self?.model.refreshCodex() })
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            button.title = "Лимиты"
+            button.title = ""
+            button.image = NSImage(systemSymbolName: "gauge.with.dots.needle.50percent", accessibilityDescription: "Лимиты аккаунтов")
+            button.image?.isTemplate = true
+            button.setAccessibilityLabel("Лимиты аккаунтов")
             button.toolTip = "Показать или скрыть Лимиты"
             button.target = self
             button.action = #selector(statusBarClick)
@@ -415,7 +452,7 @@ final class App: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
-    @objc func refresh() { model.refreshClaude(); model.refreshCodex() }
+    @objc func refresh() { model.refreshAll() }
 }
 
 @main
