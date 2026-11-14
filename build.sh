@@ -10,6 +10,7 @@ make_app() {
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
   mkdir -p "$bundle/Contents/Resources/helpers"
   cp Resources/helpers/*.py Resources/helpers/*.sh "$bundle/Contents/Resources/helpers/"
+  cp "Design/$executable.icns" "$bundle/Contents/Resources/${executable}AppIcon.icns"
   chmod +x "$bundle/Contents/Resources/helpers/"*.sh
   cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -19,10 +20,12 @@ make_app() {
 <key>CFBundleIdentifier</key><string>$identifier</string>
 <key>CFBundleExecutable</key><string>$executable</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>1.1.1</string>
+<key>CFBundleIconFile</key><string>${executable}AppIcon.icns</string>
+<key>CFBundleVersion</key><string>1.1.1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><$accessory/>
+<key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>pultpublic</string><key>CFBundleURLSchemes</key><array><string>pultpublic</string></array></dict></array>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppleEventsUsageDescription</key><string>Открывать Codex и вход в аккаунт в Terminal по нажатию пользователя.</string>
 </dict></plist>
@@ -30,6 +33,7 @@ PLIST
 }
 make_app 'Пульт' Pult local.pultpublic.app false
 make_app 'Лимиты' Limits local.pultpublic.limits true
+/usr/libexec/PlistBuddy -c "Delete :CFBundleURLTypes" "dist/Лимиты.app/Contents/Info.plist"
 xcrun swiftc -target "$(uname -m)-apple-macos14.0" -O -parse-as-library -module-name Pult -module-cache-path "$CLANG_MODULE_CACHE_PATH" Sources/Pult/*.swift -o 'dist/Пульт.app/Contents/MacOS/Pult'
 xcrun swiftc -target "$(uname -m)-apple-macos14.0" -O -parse-as-library -module-name Limits -module-cache-path "$CLANG_MODULE_CACHE_PATH" Sources/Limits/*.swift -o 'dist/Лимиты.app/Contents/MacOS/Limits'
 codesign --force --deep --sign - 'dist/Пульт.app'
