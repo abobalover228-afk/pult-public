@@ -1,0 +1,14 @@
+.build/
+dist/
+*.zip
+.DS_Store
+__pycache__/
+*.pyc
+.env*
+auth.json
+vless.txt
+xray.json
+*.log
+.codex*/
+Apps/
+accounts.json

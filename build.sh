@@ -1,0 +1,38 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+mkdir -p dist .build/module-cache
+export CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache"
+export SWIFT_MODULECACHE_PATH="$PWD/.build/module-cache"
+make_app() {
+  local name="$1" executable="$2" identifier="$3" accessory="$4"
+  local bundle="dist/$name.app"
+  mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+  mkdir -p "$bundle/Contents/Resources/helpers"
+  cp Resources/helpers/*.py Resources/helpers/*.sh "$bundle/Contents/Resources/helpers/"
+  chmod +x "$bundle/Contents/Resources/helpers/"*.sh
+  cat > "$bundle/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>$name</string>
+<key>CFBundleIdentifier</key><string>$identifier</string>
+<key>CFBundleExecutable</key><string>$executable</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.0.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>LSUIElement</key><$accessory/>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSAppleEventsUsageDescription</key><string>Открывать Codex и вход в аккаунт в Terminal по нажатию пользователя.</string>
+</dict></plist>
+PLIST
+}
+make_app 'Пульт' Pult local.pultpublic.app false
+make_app 'Лимиты' Limits local.pultpublic.limits true
+xcrun swiftc -target "$(uname -m)-apple-macos14.0" -O -parse-as-library -module-name Pult -module-cache-path "$CLANG_MODULE_CACHE_PATH" Sources/Pult/*.swift -o 'dist/Пульт.app/Contents/MacOS/Pult'
+xcrun swiftc -target "$(uname -m)-apple-macos14.0" -O -parse-as-library -module-name Limits -module-cache-path "$CLANG_MODULE_CACHE_PATH" Sources/Limits/*.swift -o 'dist/Лимиты.app/Contents/MacOS/Limits'
+codesign --force --deep --sign - 'dist/Пульт.app'
+codesign --force --deep --sign - 'dist/Лимиты.app'
+ditto -c -k --keepParent dist Pult-macOS.zip
+printf '\nГотово: dist/Пульт.app и dist/Лимиты.app\n'

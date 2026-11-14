@@ -1,0 +1,21 @@
+name: Build macOS apps
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check
+        run: bash check.sh
+      - name: Build apps
+        run: bash build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pult-macOS
+          path: Pult-macOS.zip
+          if-no-files-found: error
