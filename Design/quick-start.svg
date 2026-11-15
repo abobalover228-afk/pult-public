@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title desc">
+  <title id="title">Первый запуск Пульта</title>
+  <desc id="desc">Скачайте или соберите два приложения, войдите в Codex или Claude либо добавьте API, затем выберите папку для CLI и отправьте задачу.</desc>
+  <rect width="1200" height="320" rx="24" fill="#171b22"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="40" y="48" fill="#f0f2f5" font-size="24" font-weight="700">От установки до первой задачи</text>
+    <text x="40" y="77" fill="#aeb6c3" font-size="16">Три шага для первого запуска</text>
+    <g fill="#232933" stroke="#3b4350">
+      <rect x="40" y="104" width="340" height="178" rx="18"/>
+      <rect x="430" y="104" width="340" height="178" rx="18"/>
+      <rect x="820" y="104" width="340" height="178" rx="18"/>
+    </g>
+    <g fill="#e99460">
+      <circle cx="78" cy="142" r="18"/>
+      <circle cx="468" cy="142" r="18"/>
+      <circle cx="858" cy="142" r="18"/>
+    </g>
+    <g fill="#171b22" font-size="18" font-weight="700" text-anchor="middle">
+      <text x="78" y="148">1</text>
+      <text x="468" y="148">2</text>
+      <text x="858" y="148">3</text>
+    </g>
+    <g fill="#f0f2f5" font-size="21" font-weight="700">
+      <text x="60" y="193">Установите приложения</text>
+      <text x="450" y="193">Подключите помощника</text>
+      <text x="840" y="193">Отправьте задачу</text>
+    </g>
+    <g fill="#c0c7d2" font-size="17">
+      <text x="60" y="225">Скачайте или соберите</text>
+      <text x="60" y="251">«Пульт» и «Лимиты».</text>
+      <text x="450" y="225">Войдите в Codex / Claude</text>
+      <text x="450" y="251">или добавьте API-подключение.</text>
+      <text x="840" y="225">Для CLI выберите папку.</text>
+      <text x="840" y="251">Напишите, что нужно сделать.</text>
+    </g>
+    <g fill="none" stroke="#e99460" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M393 194h24m-8-8 8 8-8 8"/>
+      <path d="M783 194h24m-8-8 8 8-8 8"/>
+    </g>
+  </g>
+</svg>
