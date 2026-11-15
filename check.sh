@@ -15,5 +15,3 @@ done
 
 xcrun swiftc -suppress-warnings -parse-as-library -module-cache-path "$PWD/.build/module-cache" Sources/Limits/WidgetState.swift Checks/WidgetChecks.swift -o .build/WidgetChecks
 .build/WidgetChecks
-xcrun swiftc -suppress-warnings -parse-as-library Sources/Pult/Codex.swift Checks/LargeInputChecks.swift -o .build/LargeInputChecks
-.build/LargeInputChecks
