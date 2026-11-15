@@ -20,9 +20,9 @@ make_app() {
 <key>CFBundleIdentifier</key><string>$identifier</string>
 <key>CFBundleExecutable</key><string>$executable</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.1.1</string>
+<key>CFBundleShortVersionString</key><string>1.2.0</string>
 <key>CFBundleIconFile</key><string>${executable}AppIcon.icns</string>
-<key>CFBundleVersion</key><string>1.1.1</string>
+<key>CFBundleVersion</key><string>1.2.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><$accessory/>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>pultpublic</string><key>CFBundleURLSchemes</key><array><string>pultpublic</string></array></dict></array>
