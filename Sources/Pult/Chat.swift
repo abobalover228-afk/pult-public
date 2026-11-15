@@ -1,6 +1,7 @@
 // Модель чата: диалог Codex, поток ответа, команды, разрешения, авто-переключение аккаунтов.
 import AppKit
 import Foundation
+import Combine
 
 enum Kind { case user, agent, command, file, thinking, note, error, approval, question }
 
@@ -12,6 +13,8 @@ final class Item: ObservableObject, Identifiable {
     @Published var done = false
     @Published var exitCode: Int? = nil
     @Published var decision: String? = nil       // для разрешений
+    @Published var serviceCollapsed = false
+    var isPlan = false
     @Published var expanded = false
     @Published var hover = false
     var rpcId: Any? = nil
@@ -62,8 +65,28 @@ func threadTitle(_ path: String, _ mtime: Date) -> (String, String) {
 struct Limits { var five: Double?; var week: Double?; var fiveReset: Double?; var weekReset: Double? }
 
 final class Chat: ObservableObject {
+    var stateSubscriptions = Set<AnyCancellable>()
+    let preferences = ConversationPreferences.shared
+    let team = TeamRun()
+    @Published var showRules = false
+    @Published var editingItem: Item?
+    @Published var editingText = ""
+    @Published var editingImages: [String] = []
+    @Published var restorePoint: LocalConversation?
+    var restoreQueue: [QueuedMessage] = []
+    var draftConversationKey = "draft:" + UUID().uuidString
+    var localConversationID: UUID?
+    var freshContextSeed: String?
+    var freshContextImages:[String]=[]
+    var connectBranches=true
+    var appliedRules: String?
+    var claudeIsolatedSession: String?
+    @Published var codexFast = false
+    @Published var claudeFast = false
+    func rebuildItemIndex() { index = Dictionary(items.map { ($0.id,$0) }, uniquingKeysWith: { _,new in new }) }
+    func detachThreadForBranch() { threadId = nil; threadLoaded = false }
     @Published var items: [Item] = []
-    @Published var busy = false
+    @Published var busy = false { didSet { if oldValue && !busy { collapseServiceBlocks(); saveLocalBranch() } } }
     @Published var connecting = false
     @Published var showAPIConnections = false
     var apiConnectionStore = APIConnectionStore.shared
@@ -135,6 +158,8 @@ final class Chat: ObservableObject {
     var account: Account { accounts[min(current, accounts.count - 1)] }
 
     init(connectImmediately: Bool = true) {
+        team.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in:&stateSubscriptions)
+        preferences.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in:&stateSubscriptions)
         if isAPI && selectedAPI == nil { target = "codex" }
         if connectImmediately { if !isAPI { connect(bestAccount()) }; loadThreads() }
     }
@@ -158,17 +183,22 @@ final class Chat: ObservableObject {
                     if best[tid] == nil || m > best[tid]!.date { best[tid] = (path, m, a.name) }
                 }
             }
-            let list = best.sorted { $0.value.date > $1.value.date }.prefix(200).map { tid, v -> ThreadInfo in
+            let ordered = best.sorted { $0.value.date > $1.value.date }
+            let pinned = self.preferences.pins
+            let selected = ordered.filter { pinned.contains($0.key) } + ordered.filter { !pinned.contains($0.key) }.prefix(200)
+            let list = selected.map { tid, v -> ThreadInfo in
                 let (title, cwd) = threadTitle(v.path, v.date)
                 return ThreadInfo(id: tid, path: v.path, title: title, date: v.date, account: v.account, cwd: cwd)
             }
             let apiThreads = APIHistory.threads()
-            DispatchQueue.main.async { self.threads = (Array(list) + apiThreads).sorted { $0.date > $1.date } }
+            DispatchQueue.main.async { self.threads = (Array(list) + apiThreads + LocalConversationStore.threads()).sorted { $0.date > $1.date } }
         }
     }
 
     /// Открыть прошлый диалог на текущем аккаунте и показать историю.
     func open(_ t: ThreadInfo) {
+        if t.id.hasPrefix("local:") { openLocalBranch(t); return }
+        localConversationID = nil; freshContextSeed = nil; freshContextImages=[]; appliedRules = nil
         if t.id.hasPrefix("api:") { openAPI(t); return }
         if isAPI && busy { add(.note, "Сначала останови API-ответ."); return }
         if isAPI { target = "codex" }
@@ -206,7 +236,7 @@ final class Chat: ObservableObject {
             if let t = it["text"] as? String, !t.isEmpty { add(.agent, t, id: id).done = true }
         case "commandExecution":
             let i = add(.command, cleanCommand((it["command"] as? String) ?? ""), id: id)
-            i.output = String(((it["aggregatedOutput"] as? String) ?? "").suffix(6000))
+            i.output = (it["aggregatedOutput"] as? String) ?? ""
             i.exitCode = (it["exitCode"] as? NSNumber)?.intValue; i.done = true
         case "fileChange":
             let paths = ((it["changes"] as? [JSON]) ?? []).compactMap { $0["path"] as? String }
@@ -350,6 +380,9 @@ final class Chat: ObservableObject {
     // MARK: диалог
 
     func newChat() {
+        team.cancel()
+        localConversationID = nil; freshContextSeed = nil; freshContextImages=[]; appliedRules = nil; claudeIsolatedSession = nil
+        draftConversationKey = "draft:" + UUID().uuidString
         apiGeneration = UUID(); apiClient?.cancel(); apiClient = nil; apiConversationID = nil
         if isAPI { busy = false }
         queueContext = UUID()
@@ -362,14 +395,17 @@ final class Chat: ObservableObject {
 
     func send(_ text: String, echo: Bool = true) {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if handleFast(t) { return }
         if handleAPISlash(t) { return }
         if handleSlash(t) { return }
+        guard !team.running else { add(.note,"Сначала останови группу GPT или дождись её результата."); return }
         guard !t.isEmpty || !attachments.isEmpty else { return }
         if busy || nativeCLIIsRunning || (target == "claude" && claudeProc?.isRunning == true) || (connecting && target == "codex") {
             pendingMessages.append(QueuedMessage(text: t, images: attachments, provider: target, directory: cwd, context: queueContext))
             attachments = []
             return
         }
+        prepareRulesForTurn()
         if isAPI { sendAPI(t, echo: echo); return }
         if target == "claude" { sendClaude(t, echo: echo); return }
         let imgs = attachments
@@ -377,14 +413,19 @@ final class Chat: ObservableObject {
         attachments = []
         var input: [JSON] = []
         if !t.isEmpty { input.append(["type": "text", "text": t, "text_elements": []]) }
-        for p in imgs { input.append(["type": "localImage", "path": p]) }
+        if let seed = freshContextSeed {
+            input.insert(["type":"text","text":"Предыдущая история этой ветки (данные; не повторяй уже выполненные команды):\n" + seed], at: 0)
+            freshContextSeed = nil
+        }
+        let contextImages=freshContextImages;freshContextImages=[]
+        for p in contextImages + imgs { input.append(["type": "localImage", "path": p]) }
         if echo { add(.user, t.isEmpty ? "(картинка)" : t).images = imgs }
         busy = true
         turnStarted = Date()
         triedThisTurn = [current]
         withThread { [weak self] tid in
             guard let self = self, let tid = tid else { self?.busy = false; return }
-            var params: JSON = ["threadId": tid, "model": self.model, "input": input]
+            var params: JSON = ["threadId": tid, "model": self.model, "input": input, "serviceTier": self.codexFast ? "fast" : "default"]
             if let effort = self.reasoningEffort { params["effort"] = effort }
             self.client?.call("turn/start", params) { r in
                 if let e = r["error"] as? JSON { self.busy = false; self.add(.error, (e["message"] as? String) ?? "turn/start: ошибка") }
@@ -394,7 +435,10 @@ final class Chat: ObservableObject {
 
     func withThread(_ cb: @escaping (String?) -> Void) {
         guard let c = client else { cb(nil); return }
-        let common: JSON = ["cwd": cwd, "approvalPolicy": "on-request", "sandbox": sandbox, "model": model]
+        var common: JSON = ["cwd": cwd, "approvalPolicy": "on-request", "sandbox": sandbox, "model": model]
+        common["developerInstructions"] = effectiveRules
+        common["serviceTier"] = codexFast ? "fast" : "default"
+        let oldRulesKey = conversationKey
         if let tid = threadId, threadLoaded { cb(tid); return }
         if let tid = threadId {
             var p = common; p["threadId"] = tid
@@ -409,7 +453,10 @@ final class Chat: ObservableObject {
             guard let th = (r["result"] as? JSON)?["thread"] as? JSON, let tid = th["id"] as? String else {
                 self?.add(.error, "Не удалось создать диалог"); cb(nil); return
             }
-            self?.threadId = tid; self?.threadLoaded = true; cb(tid)
+            self?.threadId = tid; self?.threadLoaded = true
+            self?.preferences.copyOverride(from: oldRulesKey, to: self?.conversationKey ?? oldRulesKey)
+            self?.appliedRules = self?.effectiveRules
+            cb(tid)
         }
     }
 
@@ -443,6 +490,7 @@ final class Chat: ObservableObject {
 
     func interrupt() {
         queuePaused = true
+        if team.running { team.cancel(); return }
         if isAPI { apiGeneration = UUID(); apiClient?.cancel(); apiClient = nil; busy = false; add(.note, "API-запрос остановлен. Провайдер мог уже начать обработку."); return }
         if let process = nativeCLIProcess, process.isRunning { process.terminate(); return }
         if let p = claudeProc, p.isRunning { p.terminate(); return }
@@ -470,6 +518,11 @@ final class Chat: ObservableObject {
                 codexOutputTokens = (total["outputTokens"] as? NSNumber)?.intValue
                 codexCachedTokens = (total["cachedInputTokens"] as? NSNumber)?.intValue
             }
+        case "turn/plan/updated":
+            let plan = (p["plan"] as? [JSON] ?? []).map { "[" + ($0["status"] as? String ?? "pending") + "] " + ($0["step"] as? String ?? "") }.joined(separator:"\n")
+            let id = "plan:" + (threadId ?? "current")
+            if let item=index[id] { item.text=plan;item.serviceCollapsed=false }
+            else { let item=add(.note,plan,id:id);item.isPlan=true }
         case "turn/started":
             turnId = (p["turn"] as? JSON)?["id"] as? String
             busy = true
@@ -491,7 +544,7 @@ final class Chat: ObservableObject {
         case "item/reasoning/summaryTextDelta":
             index[itemId]?.text += (p["delta"] as? String) ?? ""
         case "item/commandExecution/outputDelta":
-            if let i = index[itemId] { i.output = String((i.output + ((p["delta"] as? String) ?? "")).suffix(6000)) }
+            if let i = index[itemId] { i.output += (p["delta"] as? String) ?? "" }
         case "item/completed":
             guard let it = item, let i = index[itemId] else { return }
             i.done = true
@@ -499,10 +552,10 @@ final class Chat: ObservableObject {
             if i.kind == .command, it["type"] as? String == "mcpToolCall" {
                 i.exitCode = (it["status"] as? String) == "failed" ? 1 : 0
                 let content = ((it["result"] as? JSON)?["content"] as? [JSON]) ?? []
-                i.output = String(content.compactMap { $0["text"] as? String }.joined(separator: "\n").prefix(3000))
+                i.output = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
             } else if i.kind == .command {
                 i.exitCode = (it["exitCode"] as? NSNumber)?.intValue
-                if let out = it["aggregatedOutput"] as? String, !out.isEmpty { i.output = String(out.suffix(6000)) }
+                if let out = it["aggregatedOutput"] as? String, !out.isEmpty { i.output = out }
             }
             if i.kind == .thinking, i.text.isEmpty {
                 i.text = ((it["summary"] as? [String]) ?? []).joined(separator: " ")
@@ -694,6 +747,7 @@ final class Chat: ObservableObject {
     }
 
     func claudeSession() -> (id: String, resume: Bool) {
+        if let id=claudeIsolatedSession { return (id,claudeSessionExists(id)) }
         let key = "claudeSession:" + cwd
         if let sid = UserDefaults.standard.string(forKey: key), claudeSessionExists(sid) { return (sid, true) }
         let sid = UUID().uuidString.lowercased()
@@ -704,6 +758,9 @@ final class Chat: ObservableObject {
     /// Claude Code прямо в ленте: claude -p … --output-format stream-json, один разговор на проект.
     func sendClaude(_ text: String, echo: Bool = true) {
         var t = text
+        if let seed=freshContextSeed { t = "История ветки (не повторяй старые действия):\n" + seed + "\n\nНовый запрос:\n" + t;freshContextSeed=nil
+            if !freshContextImages.isEmpty { t += "\nВложения предыдущей истории: " + freshContextImages.joined(separator:", ");freshContextImages=[] }
+        }
         let imgs = attachments; attachments = []
         if !imgs.isEmpty { t += "\n\nКартинки: " + imgs.joined(separator: ", ") }
         guard !t.isEmpty, claudeProc?.isRunning != true else { return }
@@ -717,6 +774,7 @@ final class Chat: ObservableObject {
             p.arguments = ["-p", t, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", claudePermissionMode, "--resume", original, "--fork-session", "--session-id", sid.id]
             claudeForkFrom = nil
         }
+        p.arguments? += ["--append-system-prompt", effectiveRules, "--settings", claudeFast ? "{\"fastMode\":true}" : "{\"fastMode\":false}"]
         if !claudeModel.isEmpty { p.arguments? += ["--model", claudeModel] }
         if let effort = claudeEffort { p.arguments? += ["--effort", effort] }
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
@@ -779,7 +837,7 @@ final class Chat: ObservableObject {
                 guard let id = b["tool_use_id"] as? String, let i = claudeItems[id] else { continue }
                 let c = b["content"]
                 let text = (c as? String) ?? ((c as? [JSON]) ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
-                i.output = String(text.suffix(6000)); i.exitCode = (b["is_error"] as? Bool == true) ? 1 : 0; i.done = true
+                i.output = text; i.exitCode = (b["is_error"] as? Bool == true) ? 1 : 0; i.done = true
             }
         case "result":
             if let usage = o["usage"] as? JSON {
@@ -856,6 +914,7 @@ func localRollout(_ tid: String, in home: String, homes: [String]) -> String? {
 
 extension Chat {
     @discardableResult func handleSlash(_ text: String) -> Bool {
+        if handleFast(text) { return true }
         guard text.hasPrefix("/") else { return false }
         let parts = text.dropFirst().split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
         let rawCommand = parts.first.map(String.init)?.lowercased() ?? "help"

@@ -121,7 +121,7 @@ enum IntegratedCommandCatalog {
 
 extension Chat {
     var commandList: [PultCommand] {
-        if isAPI { return [PultCommand(name: "help", detail: "Возможности API"), PultCommand(name: "new", detail: "Новый диалог"), PultCommand(name: "stop", detail: "Остановить запрос"), PultCommand(name: "usage", detail: "Лимиты неизвестны")] }
+        if isAPI { return [PultCommand(name: "fast", detail: "Fast: недоступен для произвольного API"), PultCommand(name: "help", detail: "Возможности API"), PultCommand(name: "new", detail: "Новый диалог"), PultCommand(name: "stop", detail: "Остановить запрос"), PultCommand(name: "usage", detail: "Лимиты неизвестны")] }
         var seen = Set<String>()
         let dynamic = target == "claude" ? claudeCommands : []
         return (PultCommand.list(for: target) + dynamic).filter { seen.insert($0.name).inserted }.sorted { $0.name < $1.name }
@@ -292,13 +292,58 @@ extension Chat {
         do {
             let args = try CommandWords.parse(argument)
             if target == "claude" { runInlineCLI(claudeBin, ["plugin"] + (args.isEmpty ? ["list"] : args)); return }
-            if args.isEmpty || args == ["list"] { slashRPC("plugin/list", ["cwds": [cwd]]); return }
-            if args.count == 2, ["install","add"].contains(args[0]) { slashRPC("plugin/install", ["pluginName": args[1]]); return }
-            if args.count == 2, ["remove","uninstall"].contains(args[0]) {
-                pendingNativeAction = PendingNativeAction(title: "Удалить плагин?", message: args[1]) { [weak self] in self?.slashRPC("plugin/uninstall", ["pluginId": args[1]]) }; return
+            let verb = args.first ?? "list"
+            if ["list", "search", "find"].contains(verb) { listPlugins(args.dropFirst().joined(separator: " ").lowercased()); return }
+            if args.count == 2, ["install","add"].contains(verb) { installPlugin(args[1]); return }
+            if args.count == 2, ["remove","uninstall"].contains(verb) {
+                pendingNativeAction = PendingNativeAction(title: "Удалить плагин?", message: args[1]) { [weak self] in self?.slashRPC("plugin/uninstall", ["pluginId": args[1]], success: "Плагин \(args[1]) удалён. /new — чтобы разговор его не видел.") }; return
             }
             runInlineCLI(codexBin, ["plugin"] + args)
         } catch { add(.error, error.localizedDescription) }
+    }
+    /// Каталог: (id, маркетплейс, путь маркетплейса, плагин).
+    func pluginCatalog(_ done: @escaping ([(id: String, market: String, path: String?, plugin: JSON)]) -> Void) {
+        guard let client = client else { add(.error, "Codex ещё не подключён."); return }
+        client.call("plugin/list", ["cwds": [cwd]]) { [weak self] response in
+            if let error = response["error"] as? JSON { self?.add(.error, error["message"] as? String ?? "Не удалось получить плагины"); return }
+            let markets = (response["result"] as? JSON)?["marketplaces"] as? [JSON] ?? []
+            done(markets.flatMap { m in (m["plugins"] as? [JSON] ?? []).map { (id: $0["id"] as? String ?? "", market: m["name"] as? String ?? "", path: m["path"] as? String, plugin: $0) } })
+        }
+    }
+    func listPlugins(_ query: String) {
+        pluginCatalog { [weak self] all in
+            func line(_ p: JSON) -> String {
+                let ui = p["interface"] as? JSON
+                let title = ui?["displayName"] as? String ?? p["name"] as? String ?? ""
+                return "• \(title) — `\(p["id"] as? String ?? "")`" + ((ui?["shortDescription"] as? String).map { " — " + $0 } ?? "")
+            }
+            let match = all.filter { item in
+                query.isEmpty || ([item.id, (item.plugin["interface"] as? JSON)?["displayName"] as? String ?? "", (item.plugin["interface"] as? JSON)?["shortDescription"] as? String ?? ""] + (item.plugin["keywords"] as? [String] ?? [])).joined(separator: " ").lowercased().contains(query)
+            }
+            let installed = match.filter { $0.plugin["installed"] as? Bool == true }
+            let available = match.filter { $0.plugin["installed"] as? Bool != true && !$0.id.hasPrefix("app-") }
+            var text = "**Установлены (\(installed.count))**\n" + installed.map { line($0.plugin) + ($0.plugin["enabled"] as? Bool == false ? " (выключен)" : "") }.joined(separator: "\n")
+            text += "\n\n**Можно поставить (\(available.count))**\n" + available.prefix(query.isEmpty ? 25 : 60).map { line($0.plugin) }.joined(separator: "\n")
+            if available.count > (query.isEmpty ? 25 : 60) { text += "\n… ещё \(available.count - (query.isEmpty ? 25 : 60)). Уточни: /plugins search слово" }
+            text += "\n\nПоставить: `/plugins install имя@маркетплейс` · удалить: `/plugins remove имя@маркетплейс` · свой маркетплейс: `/plugins marketplace add <git-url|путь>`"
+            self?.add(.note, text)
+        }
+    }
+    func installPlugin(_ wanted: String) {
+        pluginCatalog { [weak self] all in
+            guard let self = self else { return }
+            let hits = all.filter { $0.id == wanted || $0.plugin["name"] as? String == wanted }
+            guard hits.count == 1, let hit = hits.first else {
+                self.add(.error, hits.isEmpty ? "Плагин \(wanted) не найден. /plugins search \(wanted)" : "Уточни маркетплейс: " + hits.map(\.id).joined(separator: ", ")); return
+            }
+            var params: JSON = ["pluginName": hit.plugin["name"] as? String ?? wanted, "installAttemptId": UUID().uuidString]
+            if let path = hit.path { params["marketplacePath"] = path } else { params["remoteMarketplaceName"] = hit.market }
+            self.client?.call("plugin/install", params) { [weak self] response in
+                if let error = response["error"] as? JSON { self?.add(.error, "Установка \(hit.id): " + (error["message"] as? String ?? "ошибка")); return }
+                let auth = ((response["result"] as? JSON)?["appsNeedingAuth"] as? [JSON] ?? []).map { "\($0["name"] ?? "") \($0["installUrl"] ?? "")" }
+                self?.add(.note, "Плагин \(hit.id) установлен. /new — новый разговор его подхватит." + (auth.isEmpty ? "" : "\nНужен вход: " + auth.joined(separator: "; ")))
+            }
+        }
     }
     func handleSkills(_ argument: String) {
         if target == "claude" { listClaudeFiles("skills"); return }

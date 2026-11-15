@@ -7,6 +7,7 @@ struct PultCommand: Identifiable {
     var id: String { name }
     static let common: [PultCommand] = [
         .init(name: "help", detail: "Список команд"),
+        .init(name: "fast", detail: "Быстрый режим: /fast [on|off|status]"),
         .init(name: "new", detail: "Новый разговор"),
         .init(name: "clear", detail: "Очистить контекст, начать заново"),
         .init(name: "model", detail: "Выбрать модель"),
@@ -24,7 +25,7 @@ struct PultCommand: Identifiable {
         .init(name: "init", detail: "Создать инструкции проекта"),
         .init(name: "skills", detail: "Навыки текущего проекта"),
         .init(name: "mcp", detail: "Список MCP-серверов"),
-        .init(name: "plugins", detail: "Установленные плагины"),
+        .init(name: "plugins", detail: "Плагины: /plugins [search слово|install имя@маркет|remove]"),
         .init(name: "doctor", detail: "Диагностика CLI"),
         .init(name: "version", detail: "Версия выбранного CLI"),
         .init(name: "stop", detail: "Прервать текущий ответ")
@@ -41,7 +42,7 @@ struct PultCommand: Identifiable {
         .init(name: "cost", detail: "Расход токенов последнего хода"),
         .init(name: "memory", detail: "Открыть CLAUDE.md"),
         .init(name: "agents", detail: "Список агентов Claude Code"),
-        .init(name: "plugin", detail: "Установленные плагины"),
+        .init(name: "plugin", detail: "Плагины: /plugins [search слово|install имя@маркет|remove]"),
         .init(name: "context", detail: "Информация о контексте")
     ]
     static func matches(_ draft: String, provider: String) -> [PultCommand] {

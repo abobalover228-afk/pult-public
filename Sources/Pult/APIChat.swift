@@ -28,7 +28,8 @@ extension Chat {
             guard let key = try apiConnectionStore.vault.read(connection.id), !key.isEmpty else { throw APIProblem(message: "Ключ API отсутствует в Keychain. Измени подключение и сохрани ключ.") }
             var messages = APIStoredMessage.capture(items)
             messages.append(APIStoredMessage(role: "user", text: text, images: images))
-            let wire = try messages.map { try $0.wire() }
+            var wire = try messages.map { try $0.wire() }
+            if !effectiveRules.isEmpty { wire.insert(["role":"system","content":effectiveRules],at:0) }
             let transport = makeAPIClient()
             if echo { add(.user, text.isEmpty ? "(картинка)" : text).images = images; didEcho = true }
             attachments = []; busy = true; turnStarted = Date()
@@ -46,7 +47,9 @@ extension Chat {
                     self.add(.error, error.message); self.queuePaused = true
                 }
                 do {
+                    let oldKey=self.conversationKey
                     let id = self.apiConversationID ?? UUID(); self.apiConversationID = id
+                    self.preferences.copyOverride(from:oldKey,to:self.conversationKey)
                     try APIHistory.save(APIConversation(id: id, connectionID: connection.id, connectionName: connection.name, directory: self.cwd, date: Date(), messages: APIStoredMessage.capture(self.items)))
                 } catch { self.add(.error, "Ответ показан, но API-историю не удалось сохранить на диск.") }
                 self.loadThreads(); self.drainQueue()
@@ -68,6 +71,7 @@ extension Chat {
         } catch { add(.error, "Не удалось прочитать API-историю.") }
     }
     func handleAPISlash(_ text: String) -> Bool {
+        if handleFast(text) { return true }
         guard isAPI, text.hasPrefix("/"), !text.dropFirst().contains("/") else { return false }
         switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "/help": add(.note, "API: текст, изображения (если модель поддерживает), локальная история, очередь и Суперпромпт. /new, /clear, /stop, /usage. Инструменты, MCP, CLI-команды и автоматические вопросы инструментов доступны в Codex/Claude CLI.")

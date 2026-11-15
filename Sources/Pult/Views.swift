@@ -27,7 +27,13 @@ struct ItemView: View {
     }
 
     var body: some View {
-        if !it.autoApproved { visibleContent }
+        if !it.autoApproved {
+            if it.canCollapse && it.serviceCollapsed && !expanded {
+                Button { it.serviceCollapsed=false;it.expanded=true } label: {
+                    HStack { Image(systemName:"chevron.right");Text(it.isPlan ? "План / TODO" : it.kind == .command ? "Команда и результат" : "Служебный блок");Text(String(it.text.prefix(70))).foregroundColor(.secondary);Spacer() }
+                }.buttonStyle(.plain).font(monoSmall).help("Раскрыть сохранённое содержимое")
+            } else { visibleContent }
+        }
     }
 
     var visibleContent: some View {
@@ -41,6 +47,8 @@ struct ItemView: View {
             .onHover { it.hover = $0 }
             .contextMenu {
                 Button("Скопировать") { copyText(copyable) }
+                if it.kind == .user { Button("Изменить и продолжить отсюда…") { chat.beginEdit(it) } }
+                if it.canCollapse { Button(it.serviceCollapsed ? "Раскрыть блок" : "Свернуть блок") { it.serviceCollapsed.toggle();it.expanded=false } }
                 if it.kind == .command && !it.output.isEmpty { Button("Скопировать только вывод") { copyText(it.output) } }
                 Button("Скопировать весь диалог") { copyText(chat.transcript()) }
             }
@@ -168,6 +176,7 @@ final class UIState: ObservableObject {
     @Published var showBot = false
     @Published var showWallpaper = false
     @Published var showSettings = false
+    @Published var confirmTeam = false
     @Published var search = ""
 }
 
@@ -176,9 +185,14 @@ let relFmt: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f
 struct Sidebar: View {
     @ObservedObject var chat: Chat
     @ObservedObject var ui: UIState
+    @ObservedObject private var preferences = ConversationPreferences.shared
     var list: [ThreadInfo] {
         let q = ui.search.trimmingCharacters(in: .whitespaces).lowercased()
-        return q.isEmpty ? chat.threads : chat.threads.filter { $0.title.lowercased().contains(q) || $0.account.lowercased().contains(q) }
+        let filtered = q.isEmpty ? chat.threads : chat.threads.filter { $0.title.lowercased().contains(q) || $0.account.lowercased().contains(q) }
+        return filtered.sorted { a,b in
+            let ap=preferences.pins.contains(a.id),bp=preferences.pins.contains(b.id)
+            if ap != bp { return ap };return a.date > b.date
+        }
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -193,17 +207,20 @@ struct Sidebar: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(list) { t in
+                        if t.id == list.first(where: { !preferences.pins.contains($0.id) })?.id { Text("Остальные диалоги").font(.caption2).foregroundColor(.secondary) }
+                        if t.id == list.first?.id && preferences.pins.contains(t.id) { Text("Закреплённые").font(.caption2).foregroundColor(accent) }
                         Button { chat.open(t) } label: {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(t.title).lineLimit(2).font(.system(size: 12))
+                                Text((preferences.pins.contains(t.id) ? "📌 " : "") + t.title).lineLimit(2).font(.system(size: 12))
                                 Text("\(t.account) · " + (Date().timeIntervalSince(t.date) < 60 ? "сейчас" : relFmt.localizedString(for: t.date, relativeTo: Date())))
                                     .font(.system(size: 10)).foregroundColor(.secondary)
                             }
                             .padding(.horizontal, 8).padding(.vertical, 6)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(t.id == chat.threadId ? accent.opacity(0.25) : Color.clear))
+                            .background(RoundedRectangle(cornerRadius: 6).fill(t.id == chat.conversationKey ? accent.opacity(0.25) : Color.clear))
                             .contentShape(Rectangle())
                         }.buttonStyle(.plain)
+                        .contextMenu { Button(preferences.pins.contains(t.id) ? "Открепить" : "Закрепить сверху") { preferences.togglePin(t.id) } }
                     }
                     if list.isEmpty { Text(chat.threads.isEmpty ? "Загружаю…" : "Ничего не найдено").font(.system(size: 11)).foregroundColor(.secondary) }
                 }
@@ -312,6 +329,8 @@ struct ChatView: View {
     @ObservedObject var proxy = Proxy.shared
     @StateObject private var ui = UIState()
     @StateObject private var promptCoach = PromptCoach()
+    @StateObject private var follow = FollowState()
+    @ObservedObject private var preferences = ConversationPreferences.shared
     @ObservedObject private var apiStore = APIConnectionStore.shared
 
     func pct(_ a: Account) -> String { chat.remaining(a).map { "\(Int($0))%" } ?? "?" }
@@ -401,6 +420,7 @@ struct ChatView: View {
                 Divider().opacity(0.3)
             }
             main
+            if chat.team.visible { TeamPanel(team:chat.team,chat:chat) }
             if promptCoach.isOpen {
                 Divider().opacity(0.3)
                 PromptCoachView(coach: promptCoach, chat: chat, ui: ui)
@@ -416,27 +436,17 @@ struct ChatView: View {
         VStack(spacing: 0) {
             topBar
             Divider().opacity(0.3)
-            ScrollViewReader { sv in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        if chat.items.isEmpty {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("✻ Добро пожаловать в Пульт").bold().foregroundColor(accent)
-                                Text("Codex на всех твоих аккаунтах. Кончится лимит — сам продолжит на другом.").foregroundColor(.secondary)
-                                Text("✳ Claude — отдать диалог Claude, если Codex тупит. API — через меню аккаунтов.").foregroundColor(.secondary)
-                            }
-                            .padding(12)
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent.opacity(0.6), lineWidth: 1))
-                        }
-                        ForEach(chat.items.filter { !chat.focusedConversation || [.user, .agent, .error, .question, .approval].contains($0.kind) }) { ItemView(it: $0, chat: chat).id($0.id) }
-                        Color.clear.frame(height: 1).id("bottom")
-                    }
-                    .padding(16)
-                }
-                .onChange(of: chat.items.count) { _ in withAnimation { sv.scrollTo("bottom") } }
-                .onReceive(Timer.publish(every: 0.7, on: .main, in: .common).autoconnect()) { _ in
-                    if chat.busy { sv.scrollTo("bottom") }
-                }
+            FollowingScroll(state:follow) {
+                VStack(alignment:.leading,spacing:12) {
+                    if chat.items.isEmpty { Text("Напиши задачу. API и CLI выбираются в меню аккаунтов.").foregroundColor(.secondary) }
+                    ForEach(chat.items.filter { !chat.focusedConversation || [.user,.agent,.error,.question,.approval].contains($0.kind) }) { item in ItemView(it:item,chat:chat).id(item.id)
+                            .background(GeometryReader { geometry in Color.clear.preference(key:MessagePositions.self,value:[item.id:geometry.frame(in:.named("conversation-document")).minY]) }) }
+                }.padding(16).frame(maxWidth:.infinity,alignment:.leading)
+                    .coordinateSpace(name:"conversation-document")
+                    .onPreferenceChange(MessagePositions.self){ follow.measurements?($0) }
+            }
+            if !follow.following {
+                Button { follow.resume() } label: { Label("К последним сообщениям · следить",systemImage:"arrow.down.to.line") }.buttonStyle(.borderless).padding(6).accessibilityLabel("Вернуться вниз и следить за ответом")
             }
             if chat.nativeCLIIsRunning {
                 HStack {
@@ -522,6 +532,12 @@ struct ChatView: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Автоматически подтверждать команды, файлы, дополнительные права и обычные подтверждения MCP. Настройка сохраняется. Вопросы и ввод недостающих данных остаются ручными.")
+                Button { ui.confirmTeam=true } label: { Label("Группа GPT",systemImage:"person.3") }
+                    .disabled(chat.busy || chat.connecting || chat.nativeCLIIsRunning || chat.team.running || chat.target == "claude" || ui.draft.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
+                    .help("Главный и два независимых GPT: дополнительный расход лимитов. Только анализ")
+                Button { chat.showRules=true } label: { Label("Правила",systemImage:"text.badge.checkmark") }.help("Общие правила и переопределение текущего чата")
+                if chat.restorePoint != nil { Button("Восстановить до правки") { chat.restoreEditedBranch() }.disabled(chat.busy || chat.team.running) }
+                Text((chat.target == "claude" ? chat.claudeFast : chat.codexFast) && !chat.isAPI ? "⚡ Fast запрошен" : "").font(.caption).foregroundColor(accent)
                 Spacer()
             }
             .font(.system(size: 12))
@@ -539,6 +555,13 @@ struct ChatView: View {
         }
         .font(mono)
         .preferredColorScheme(.dark)
+        .sheet(isPresented:$chat.showRules) { RulesEditor(chat:chat,preferences:preferences) }
+        .sheet(isPresented:Binding(get:{chat.editingItem != nil},set:{if !$0{chat.editingItem=nil}})) { EditMessageView(chat:chat) }
+        .confirmationDialog(chat.isAPI ? "Запустить до 4 платных API-запросов?" : "Запустить главного и двух GPT?",isPresented:$ui.confirmTeam) {
+            Button("Запустить группу · дополнительный расход") { chat.team.start(prompt:ui.draft,chat:chat) }
+            Button("Отмена",role:.cancel) {}
+        } message: { Text("Две независимые аналитические подзадачи и общий ответ. Исполнители не меняют файлы. Применение изменений остаётся основному диалогу. Claude CLI в этом режиме не поддерживается.") }
+        .onChange(of:chat.queueContext) { _ in chat.team.cancel();follow.resume() }
         .onExitCommand {
             if ui.draft.hasPrefix("/"), !ui.slashDismissed { ui.slashDismissed = true }
             else { chat.interrupt() }

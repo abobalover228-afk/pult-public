@@ -4,8 +4,10 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
+        if let url = Bundle.main.url(forResource: "PultAppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = icon
+        }
         try? FileManager.default.createDirectory(atPath: appDataDir, withIntermediateDirectories: true)
-        if let url = Bundle.main.url(forResource: "PultAppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) { NSApp.applicationIconImage = icon }
         Proxy.shared.apply()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
