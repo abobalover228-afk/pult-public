@@ -25,6 +25,8 @@ final class Item: ObservableObject, Identifiable {
     var images: [String] = []                    // вложенные картинки (для истории)
     @Published var questionAnswers: [String: String] = [:]
     weak var questionClient: CodexClient?
+    weak var rpcClient: CodexClient?             // кто прислал запрос — тому и отвечаем
+    var claudeRequest: String?                   // запрос Claude (control_request), а не Codex
     var payload: JSON = [:]
     init(_ id: String, _ kind: Kind, _ text: String) { self.id = id; self.kind = kind; self.text = text }
 }
@@ -65,9 +67,17 @@ func threadTitle(_ path: String, _ mtime: Date) -> (String, String) {
 struct Limits { var five: Double?; var week: Double?; var fiveReset: Double?; var weekReset: Double? }
 
 final class Chat: ObservableObject {
+    let sessionID = UUID()
+    let ui = UIState()
+    let isPrimary: Bool
+    var onEvent: ((Chat, ChatEvent) -> Void)?
+    @Published var subagents: Set<String> = []     // потоки субагентов, которые сейчас работают
+    @Published var unread = false
+    @Published var lastError = false
+    @Published var customTitle: String?
+    var telegramBound = false                      // ход запущен из Telegram — ответ уйдёт туда
     var stateSubscriptions = Set<AnyCancellable>()
     let preferences = ConversationPreferences.shared
-    let team = TeamRun()
     @Published var showRules = false
     @Published var editingItem: Item?
     @Published var editingText = ""
@@ -96,18 +106,21 @@ final class Chat: ObservableObject {
     var apiConversationID: UUID?
     @Published var accounts = loadAccounts()
     @Published var current = 0
-    @Published var limits: [String: Limits] = [:]          // по CODEX_HOME
-    @Published var model = "gpt-6.1-sol"
-    @Published var claudeModel = ""
+    var limits: [String: Limits] { LimitsStore.shared.limits }      // по CODEX_HOME, общие для всех чатов
+    @Published var model = UserDefaults.standard.string(forKey: "codexModel") ?? "gpt-6.1-sol" { didSet { UserDefaults.standard.set(model, forKey: "codexModel") } }
+    @Published var claudeModel = UserDefaults.standard.string(forKey: "claudeModel") ?? "" { didSet { UserDefaults.standard.set(claudeModel, forKey: "claudeModel") } }
     @Published var showCommandSettings = false
     @Published var showModelChoices = false
     @Published var modelChoices: [ModelChoice] = []
     @Published var showClaudeConversations = false
     @Published var claudeConversations: [ClaudeConversation] = []
-    @Published var reasoningEffort: String? = nil
-    @Published var claudeEffort: String? = nil
+    @Published var reasoningEffort: String? = UserDefaults.standard.string(forKey: "codexEffort") { didSet { UserDefaults.standard.set(reasoningEffort, forKey: "codexEffort") } }
+    @Published var claudeEffort: String? = UserDefaults.standard.string(forKey: "claudeEffort") { didSet { UserDefaults.standard.set(claudeEffort, forKey: "claudeEffort") } }
+    var claudeAddDirs: [String] = []
+    private var turnMarks: [(turn: String, count: Int)] = []      // для /undo: с какого элемента начался ход
+    private var pendingMark = 0
     @Published var claudePermissionMode = "auto"
-    @Published var claudeCommands: [PultCommand] = []
+    @Published var claudeCommands: [PultCommand] = (UserDefaults.standard.stringArray(forKey: "claudeCommands") ?? []).map { PultCommand(name: $0, detail: "Навык установленного Claude Code") }
     @Published var pendingNativeAction: PendingNativeAction? = nil
     @Published var nativeCLIIsRunning = false
     var nativeCLIProcess: Process?
@@ -141,6 +154,12 @@ final class Chat: ObservableObject {
     private var claudeProc: Process?
     private var claudeItems: [String: Item] = [:]
     private var claudeText: Item?
+    private var claudeInput: FileHandle?
+    private var claudeRun = UUID()               // события прошлого запуска Claude игнорируются
+    private var claudeInterrupted = false
+    private var claudeFailed = false
+    private var continuingAfterLimit = false
+    private var interruptWanted = false
     var autoSwitch = true
 
     var client: CodexClient?
@@ -157,9 +176,10 @@ final class Chat: ObservableObject {
 
     var account: Account { accounts[min(current, accounts.count - 1)] }
 
-    init(connectImmediately: Bool = true) {
-        team.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in:&stateSubscriptions)
+    init(connectImmediately: Bool = true, primary: Bool = true) {
+        isPrimary = primary
         preferences.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in:&stateSubscriptions)
+        LimitsStore.shared.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in:&stateSubscriptions)
         if isAPI && selectedAPI == nil { target = "codex" }
         if connectImmediately { if !isAPI { connect(bestAccount()) }; loadThreads() }
     }
@@ -205,7 +225,8 @@ final class Chat: ObservableObject {
         guard let c = client, t.id != threadId else { return }
         queueContext = UUID()
         codexInputTokens = nil; codexOutputTokens = nil; codexCachedTokens = nil
-        if busy { interrupt() }
+        if !c.alive { reconnect(); add(.note, "Codex переподключается — открой диалог ещё раз через пару секунд."); return }
+        dropCurrentTurn()
         items = []; index = [:]; threadId = t.id; threadLoaded = false
         if !t.cwd.isEmpty, FileManager.default.fileExists(atPath: t.cwd) { cwd = t.cwd }
         let path = localRollout(t.id, in: account.home, homes: accounts.map(\.home)) ?? t.path
@@ -261,47 +282,42 @@ final class Chat: ObservableObject {
         return idx.max { (remaining(accounts[$0]) ?? 50) < (remaining(accounts[$1]) ?? 50) } ?? 0
     }
 
-    /// Обновить лимиты всех аккаунтов (короткие app-server без запуска модели).
-    private var pendingLimits = 0
+    /// Обновить лимиты всех аккаунтов (общий кэш; свой аккаунт — через уже запущенный Codex).
     private var pickedInitial = false
 
-    func refreshAllLimits() {
-        pendingLimits = accounts.count
-        for a in accounts where a.home != account.home {
-            let c = CodexClient(home: a.home)
-            c.start { [weak self] ok in
-                guard ok else { c.stop(); return }
-                c.call("account/rateLimits/read", [:]) { r in
-                    if let rl = ((r["result"] as? JSON)?["rateLimits"]) as? JSON { self?.storeLimits(a.home, rl) }
-                    else { self?.limits[a.home] = Limits(five: 100, week: 100) }   // нет входа → считаем пустым
-                    c.stop()
-                    self?.limitArrived()
-                }
+    func refreshAllLimits(force: Bool = false) {
+        var left = 2
+        let arrived: () -> Void = { [weak self] in
+            left -= 1
+            if left == 0 { self?.limitsReady() }
+        }
+        let own = client?.alive == true ? account.home : nil
+        LimitsStore.shared.refresh(accounts: accounts, skipping: own, force: force, done: arrived)
+        if let c = client, c.alive {
+            let home = account.home
+            c.call("account/rateLimits/read", [:]) { r in
+                if let rl = ((r["result"] as? JSON)?["rateLimits"]) as? JSON { LimitsStore.shared.store(home, rl) }
+                arrived()
             }
-        }
-        client?.call("account/rateLimits/read", [:]) { [weak self] r in
-            guard let self = self else { return }
-            if let rl = ((r["result"] as? JSON)?["rateLimits"]) as? JSON { self.storeLimits(self.account.home, rl) }
-            self.limitArrived()
-        }
+        } else { arrived() }
     }
 
     /// Первый запуск: когда известны лимиты всех аккаунтов и диалога ещё нет — перейти на самый свободный.
-    private func limitArrived() {
-        pendingLimits -= 1
-        dbg("limitArrived pending=\(pendingLimits) picked=\(pickedInitial)")
-        guard pendingLimits <= 0, !pickedInitial else { return }
+    private func limitsReady() {
+        guard !pickedInitial else { return }
         pickedInitial = true
         var best = bestAccount()
-        if let f = ProcessInfo.processInfo.environment["PULT_ACCOUNT"].flatMap(Int.init), accounts.indices.contains(f) { best = f }
-        let forced = ProcessInfo.processInfo.environment["PULT_ACCOUNT"] != nil
-        if target == "codex", autoSwitch, threadId == nil, !busy, best != current, forced || (remaining(accounts[best]) ?? 0) > (remaining(account) ?? 0) {
+        let env = isPrimary ? ProcessInfo.processInfo.environment["PULT_ACCOUNT"] : nil
+        if let f = env.flatMap(Int.init), accounts.indices.contains(f) { best = f }
+        let forced = env != nil
+        if target == "codex", autoSwitch, threadId == nil, !busy, pendingMessages.isEmpty, best != current, forced || (remaining(accounts[best]) ?? 0) > (remaining(account) ?? 0) + 5 {
             connect(best) { [weak self] in self?.autotest() }
         } else { autotest() }
     }
 
-    /// PULT_AUTOTEST="текст": отправить и записать диалог в Application Support/PultPublic/autotest.log (самопроверка).
+    /// PULT_AUTOTEST="текст": отправить и записать диалог в ~/Library/Application Support/PultPublic/autotest.log (самопроверка).
     private func autotest() {
+        guard isPrimary else { return }
         if ProcessInfo.processInfo.environment["PULT_AUTOOPEN"] == "1" {      // открыть последний диалог
             func tryOpen(_ n: Int) {
                 dbg("tryOpen threads=\(threads.count) client=\(client != nil)")
@@ -320,22 +336,15 @@ final class Chat: ObservableObject {
         try? lines.joined(separator: "\n").write(toFile: appDataDir + "/autotest.log", atomically: true, encoding: .utf8)
     }
 
-    func storeLimits(_ home: String, _ rl: JSON) {
-        var l = Limits()
-        for key in ["primary", "secondary"] {
-            guard let w = rl[key] as? JSON, let used = (w["usedPercent"] as? NSNumber)?.doubleValue else { continue }
-            let mins = (w["windowDurationMins"] as? NSNumber)?.doubleValue ?? 0
-            let reset = (w["resetsAt"] as? NSNumber)?.doubleValue
-            if mins <= 300 { l.five = used; l.fiveReset = reset } else { l.week = used; l.weekReset = reset }
-        }
-        limits[home] = l
-    }
+    func storeLimits(_ home: String, _ rl: JSON) { LimitsStore.shared.store(home, rl) }
 
     func connect(_ idx: Int, then: (() -> Void)? = nil) {
+        expirePending()
         client?.stop()
         current = idx
         threadLoaded = false
         connecting = true
+        turnId = nil; subagents = []
         let c = CodexClient(home: account.home, extraEnv: Proxy.shared.env)
         client = c
         c.onNotification = { [weak self, weak c] m, p in
@@ -348,23 +357,69 @@ final class Chat: ObservableObject {
         }
         c.onExit = { [weak self, weak c] in
             guard let self = self, c === self.client else { return }
-            guard self.target == "codex" else { return }
-            self.busy = false; self.connecting = false
-            self.add(.error, "Codex (\(self.account.name)) завершился. Выбери аккаунт заново.")
+            let reason = c?.lastErrorText ?? ""
+            self.client = nil; self.threadLoaded = false; self.connecting = false
+            self.turnId = nil; self.subagents = []
+            self.expirePending()
+            guard self.target == "codex" else { return }          // Claude/API работают сами по себе
+            let wasBusy = self.busy
+            self.add(.error, "Codex (\(self.account.name)) завершился" + (reason.isEmpty ? "." : ": " + reason) + "\nСледующее сообщение переподключит его само.")
+            if wasBusy {
+                self.queuePaused = true; self.busy = false
+                self.onEvent?(self, .finished(took: Date().timeIntervalSince(self.turnStarted ?? Date()), failed: true))
+            }
         }
         c.start { [weak self] ok in
             guard let self = self, c === self.client else { return }
             self.connecting = false
-            if !ok { self.add(.error, "Не удалось запустить Codex для \(self.account.name)."); return }
+            if !ok {
+                let reason = c.lastErrorText
+                self.client = nil
+                self.add(.error, "Не удалось запустить Codex для \(self.account.name)." + (reason.isEmpty ? "" : "\n" + reason)); return
+            }
             c.call("account/read", ["refreshToken": false]) { r in
+                guard r["error"] == nil else { return }
                 if ((r["result"] as? JSON)?["account"]) is NSNull || (r["result"] as? JSON)?["account"] == nil {
                     self.add(.note, "У «\(self.account.name)» нет входа — нажми «Войти» в меню аккаунтов.")
                 }
             }
             self.refreshAllLimits()
+            ModelCatalog.shared.load(c)
             then?()
             self.drainQueue()
         }
+    }
+
+    /// Перезапустить Codex на том же аккаунте (упал, сменилась сеть).
+    func reconnect() { if !connecting { connect(current) } }
+
+    /// Закрытие вкладки: остановить всё, что этот чат запустил.
+    func shutdown() {
+        expirePending()
+        client?.stop(); client = nil
+        claudeRun = UUID(); claudeProc?.terminate(); claudeProc = nil
+        nativeCLIProcess?.terminate()
+        apiGeneration = UUID(); apiClient?.cancel(); apiClient = nil
+    }
+
+    /// Бросить текущий ход: чат переходит к другому диалогу, поздние события старого игнорируются.
+    private func dropCurrentTurn() {
+        let pausedBefore = queuePaused
+        if busy || claudeProc?.isRunning == true {
+            if claudeProc?.isRunning == true { claudeRun = UUID(); claudeInterrupted = true; claudeProc?.terminate(); claudeProc = nil; claudeInput = nil }
+            else { interrupt() }
+            busy = false
+        }
+        queuePaused = pausedBefore
+        expirePending()
+        turnId = nil; subagents = []; interruptWanted = false; telegramBound = false
+    }
+
+    /// Карточки разрешений и вопросов, на которые уже некому ответить.
+    func expirePending() {
+        var changed = false
+        for it in items where (it.kind == .approval || it.kind == .question) && it.decision == nil { it.decision = "expired"; changed = true }
+        if changed { objectWillChange.send() }
     }
 
     func switchTo(_ idx: Int, prompt: String? = nil) {
@@ -373,14 +428,13 @@ final class Chat: ObservableObject {
         connect(idx) { [weak self] in
             guard let self = self else { return }
             if self.threadId != nil { self.add(.note, "⇄ \(from) → \(self.account.name): тот же диалог продолжается здесь.") }
-            if let p = prompt { self.send(p, echo: false) }
+            if let p = prompt { self.continuingAfterLimit = true; self.send(p, echo: false) }
         }
     }
 
     // MARK: диалог
 
     func newChat() {
-        team.cancel()
         localConversationID = nil; freshContextSeed = nil; freshContextImages=[]; appliedRules = nil; claudeIsolatedSession = nil
         draftConversationKey = "draft:" + UUID().uuidString
         apiGeneration = UUID(); apiClient?.cancel(); apiClient = nil; apiConversationID = nil
@@ -388,28 +442,42 @@ final class Chat: ObservableObject {
         queueContext = UUID()
         codexInputTokens = nil; codexOutputTokens = nil; codexCachedTokens = nil
         claudeInputTokens = nil; claudeOutputTokens = nil; claudeCachedTokens = nil
-        if busy { interrupt() }
-        items = []; index = [:]; threadId = nil; threadLoaded = false
+        dropCurrentTurn()
+        items = []; index = [:]; threadId = nil; threadLoaded = false; turnMarks = []
+        unread = false; lastError = false; customTitle = nil
         loadThreads()
     }
 
     func send(_ text: String, echo: Bool = true) {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if handleFast(t) { return }
         if handleAPISlash(t) { return }
         if handleSlash(t) { return }
-        guard !team.running else { add(.note,"Сначала останови группу GPT или дождись её результата."); return }
         guard !t.isEmpty || !attachments.isEmpty else { return }
+        if t.hasPrefix("!"), t.count > 1, attachments.isEmpty {            // !команда — выполнить в терминале проекта
+            runInlineCLI("/bin/zsh", ["-lc", String(t.dropFirst())]); return
+        }
+        lastError = false
+        if target == "codex", client?.alive != true, !connecting, !busy, !nativeCLIIsRunning {
+            // Codex упал или ещё не запущен: поднимаем его и отправляем это сообщение первым.
+            let message = QueuedMessage(text: t, images: attachments, provider: target, directory: cwd, context: queueContext)
+            pendingMessages.insert(message, at: 0); immediateQueuedID = message.id
+            attachments = []
+            connect(current)
+            return
+        }
         if busy || nativeCLIIsRunning || (target == "claude" && claudeProc?.isRunning == true) || (connecting && target == "codex") {
             pendingMessages.append(QueuedMessage(text: t, images: attachments, provider: target, directory: cwd, context: queueContext))
             attachments = []
             return
         }
         prepareRulesForTurn()
+        let files = attachments.filter { !isImagePath($0) }
+        if !files.isEmpty { attachments.removeAll(where: files.contains); t += attachedFilesNote(files, inline: isAPI) }
         if isAPI { sendAPI(t, echo: echo); return }
         if target == "claude" { sendClaude(t, echo: echo); return }
         let imgs = attachments
-        guard !t.isEmpty || !imgs.isEmpty, let c = client else { return }
+        guard !t.isEmpty || !imgs.isEmpty, client != nil else { return }
         attachments = []
         var input: [JSON] = []
         if !t.isEmpty { input.append(["type": "text", "text": t, "text_elements": []]) }
@@ -419,10 +487,12 @@ final class Chat: ObservableObject {
         }
         let contextImages=freshContextImages;freshContextImages=[]
         for p in contextImages + imgs { input.append(["type": "localImage", "path": p]) }
+        pendingMark = items.count
         if echo { add(.user, t.isEmpty ? "(картинка)" : t).images = imgs }
         busy = true
         turnStarted = Date()
-        triedThisTurn = [current]
+        if continuingAfterLimit { triedThisTurn.insert(current) } else { triedThisTurn = [current] }
+        continuingAfterLimit = false; interruptWanted = false
         withThread { [weak self] tid in
             guard let self = self, let tid = tid else { self?.busy = false; return }
             var params: JSON = ["threadId": tid, "model": self.model, "input": input, "serviceTier": self.codexFast ? "fast" : "default"]
@@ -436,7 +506,7 @@ final class Chat: ObservableObject {
     func withThread(_ cb: @escaping (String?) -> Void) {
         guard let c = client else { cb(nil); return }
         var common: JSON = ["cwd": cwd, "approvalPolicy": "on-request", "sandbox": sandbox, "model": model]
-        common["developerInstructions"] = effectiveRules
+        common["developerInstructions"] = effectiveRules + codexQuestionHint
         common["serviceTier"] = codexFast ? "fast" : "default"
         let oldRulesKey = conversationKey
         if let tid = threadId, threadLoaded { cb(tid); return }
@@ -461,6 +531,37 @@ final class Chat: ObservableObject {
     }
 
     func resumeQueue() { queuePaused = false; drainQueue() }
+
+    /// Можно ли подмешать сообщение прямо в идущий ход Codex, не дожидаясь конца.
+    var canSteer: Bool { target == "codex" && busy && turnId != nil && client?.alive == true }
+
+    func steer(_ message: QueuedMessage) {
+        guard canSteer, let tid = threadId, let turn = turnId, let c = client else { return }
+        pendingMessages.removeAll { $0.id == message.id }
+        var input: [JSON] = message.text.isEmpty ? [] : [["type": "text", "text": message.text, "text_elements": []]]
+        for path in message.images where isImagePath(path) { input.append(["type": "localImage", "path": path]) }
+        let shown = add(.user, message.text.isEmpty ? "(картинка)" : message.text); shown.images = message.images
+        c.call("turn/steer", ["threadId": tid, "input": input, "expectedTurnId": turn]) { [weak self] r in
+            guard let self = self, let e = r["error"] as? JSON else { return }
+            self.items.removeAll { $0 === shown }
+            self.pendingMessages.insert(message, at: 0)
+            self.add(.note, "Не получилось добавить в текущий ход (" + ((e["message"] as? String) ?? "ошибка") + ") — сообщение осталось в очереди.")
+        }
+    }
+
+    /// Убрать последний ход из контекста Codex.
+    func undoLastTurn() {
+        guard target == "codex", !busy, let tid = threadId, let mark = turnMarks.last, let c = client, c.alive else {
+            add(.note, busy ? "Сначала дождись ответа или останови его." : "Откатывать нечего: в этом сеансе ещё не было ходов Codex."); return
+        }
+        c.call("thread/revert", ["threadId": tid, "beforeTurnId": mark.turn]) { [weak self] r in
+            guard let self = self else { return }
+            if let e = r["error"] as? JSON { self.add(.error, "Откат не удался: " + ((e["message"] as? String) ?? "?")); return }
+            self.turnMarks.removeLast()
+            self.items = Array(self.items.prefix(mark.count)); self.rebuildItemIndex()
+            self.add(.note, "Последний ход убран из разговора. Изменения в файлах проверь через /diff.")
+        }
+    }
 
     func sendQueuedNow(_ message: QueuedMessage) {
         guard message.provider == target, message.directory == cwd, message.context == queueContext else { return }
@@ -490,11 +591,11 @@ final class Chat: ObservableObject {
 
     func interrupt() {
         queuePaused = true
-        if team.running { team.cancel(); return }
         if isAPI { apiGeneration = UUID(); apiClient?.cancel(); apiClient = nil; busy = false; add(.note, "API-запрос остановлен. Провайдер мог уже начать обработку."); return }
         if let process = nativeCLIProcess, process.isRunning { process.terminate(); return }
-        if let p = claudeProc, p.isRunning { p.terminate(); return }
-        guard let tid = threadId, let turn = turnId else { return }
+        if let p = claudeProc, p.isRunning { claudeInterrupted = true; p.terminate(); return }
+        guard busy, let tid = threadId else { return }
+        guard let turn = turnId else { interruptWanted = true; return }      // ход ещё не начался — прервём, как только начнётся
         client?.call("turn/interrupt", ["threadId": tid, "turnId": turn])
     }
 
@@ -507,12 +608,19 @@ final class Chat: ObservableObject {
         return it
     }
 
-    private func notification(_ m: String, _ p: JSON) {
+    func notification(_ m: String, _ p: JSON) {
+        // События чужого потока: это субагенты (или уже закрытый диалог). Их завершение — не конец хода.
+        if let tid = p["threadId"] as? String, tid != threadId {
+            if threadId != nil, busy {
+                if m == "turn/started" { subagents.insert(tid) }
+                if m == "turn/completed" { subagents.remove(tid) }
+            }
+            return
+        }
         let item = p["item"] as? JSON
         let itemId = (p["itemId"] as? String) ?? (item?["id"] as? String) ?? ""
         switch m {
         case "thread/tokenUsage/updated":
-            if let id = p["threadId"] as? String, id != threadId { return }
             if let total = (p["tokenUsage"] as? JSON)?["total"] as? JSON {
                 codexInputTokens = (total["inputTokens"] as? NSNumber)?.intValue
                 codexOutputTokens = (total["outputTokens"] as? NSNumber)?.intValue
@@ -526,6 +634,8 @@ final class Chat: ObservableObject {
         case "turn/started":
             turnId = (p["turn"] as? JSON)?["id"] as? String
             busy = true
+            if let turn = turnId { turnMarks.append((turn, pendingMark)) }
+            if interruptWanted { interruptWanted = false; interrupt() }
         case "item/started":
             guard let it = item, let type = it["type"] as? String else { return }
             switch type {
@@ -537,6 +647,11 @@ final class Chat: ObservableObject {
             case "reasoning": add(.thinking, "", id: itemId)
             case "mcpToolCall":
                 add(.command, "\((it["server"] as? String) ?? "mcp").\((it["tool"] as? String) ?? "")", id: itemId).legacy = true
+            case "subAgentActivity":
+                let kind = ["started": "запущен", "completed": "закончил", "interrupted": "остановлен", "interacted": "получил сообщение"][it["kind"] as? String ?? ""] ?? ""
+                add(.note, "🤖 Субагент \((it["agentPath"] as? String) ?? "") \(kind)", id: itemId)
+            case "collabAgentToolCall":
+                add(.command, "🤖 \((it["tool"] as? String) ?? "agent")" + ((it["prompt"] as? String).map { ": " + $0.prefix(160) } ?? ""), id: itemId)
             default: break
             }
         case "item/agentMessage/delta":
@@ -553,6 +668,8 @@ final class Chat: ObservableObject {
                 i.exitCode = (it["status"] as? String) == "failed" ? 1 : 0
                 let content = ((it["result"] as? JSON)?["content"] as? [JSON]) ?? []
                 i.output = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
+            } else if i.kind == .command, it["type"] as? String == "collabAgentToolCall" {
+                i.exitCode = (it["status"] as? String) == "failed" ? 1 : 0
             } else if i.kind == .command {
                 i.exitCode = (it["exitCode"] as? NSNumber)?.intValue
                 if let out = it["aggregatedOutput"] as? String, !out.isEmpty { i.output = out }
@@ -564,6 +681,9 @@ final class Chat: ObservableObject {
         case "account/rateLimits/updated":
             if let rl = p["rateLimits"] as? JSON { storeLimits(account.home, rl) }
         case "turn/completed":
+            guard busy else { return }
+            if let completed = (p["turn"] as? JSON)?["id"] as? String, let active = turnId, completed != active { return }
+            turnId = nil; subagents = []
             turnCompleted(p["turn"] as? JSON ?? [:])
         case "error":
             if let e = p["error"] as? JSON, let msg = e["message"] as? String, p["willRetry"] as? Bool != true { add(.error, msg) }
@@ -579,6 +699,7 @@ final class Chat: ObservableObject {
         let took = Date().timeIntervalSince(turnStarted ?? Date())
         if info == "usageLimitExceeded" && autoSwitch {
             triedThisTurn.insert(current)
+            LimitsStore.shared.markExhausted(account.home)
             let next = bestAccount(excluding: triedThisTurn)
             if !triedThisTurn.contains(next), (remaining(accounts[next]) ?? 1) > 0 {
                 add(.note, "⚡ Лимит «\(account.name)» кончился → \(accounts[next].name)")
@@ -586,6 +707,8 @@ final class Chat: ObservableObject {
                 return
             }
             add(.error, "Лимиты кончились на всех аккаунтах. Диалог сохранён.")
+            queuePaused = true
+            onEvent?(self, .finished(took: took, failed: true))
             return
         }
         if let e = err, let msg = e["message"] as? String, turn["status"] as? String != "interrupted" { add(.error, msg) }
@@ -594,7 +717,8 @@ final class Chat: ObservableObject {
         if immediateQueuedID != nil || (err == nil && turn["status"] as? String != "interrupted") {
             DispatchQueue.main.async { [weak self] in self?.drainQueue() }
         }
-        if took > 60 { notifyDone(took, failed: err != nil) }
+        onEvent?(self, .finished(took: took, failed: err != nil))
+        telegramBound = false
         // Заранее: если осталось меньше 5% — следующий ход пойдёт на другом аккаунте.
         if autoSwitch, let r = remaining(account), r < 5 {
             let next = bestAccount(excluding: [current])
@@ -605,44 +729,41 @@ final class Chat: ObservableObject {
         }
     }
 
-    private func notifyDone(_ took: TimeInterval, failed: Bool) {
-        guard notifyTelegram, !(NSApp?.isActive ?? true) else { return }
-        let last = items.last { $0.kind == .agent }?.text ?? ""
-        let head = failed ? "❌ Codex остановился с ошибкой" : "✅ Codex закончил"
-        let text = "\(head) · \(Int(took / 60)) мин · \(account.name)\n\n" + String(last.prefix(600))
-        notifyMac("Пульт", text)
-    }
+    /// Последний ответ модели — для уведомлений.
+    var lastAnswer: String { items.last { $0.kind == .agent && !$0.text.isEmpty }?.text ?? "" }
 
     private func serverRequest(_ id: Any, _ m: String, _ p: JSON) {
+        var card: Item?
         switch m {
         case "item/commandExecution/requestApproval", "execCommandApproval":
             let cmd = (p["command"] as? String) ?? ((p["command"] as? [String])?.joined(separator: " ")) ?? "команда"
-            let it = add(.approval, "Выполнить: " + cmd + ((p["reason"] as? String).map { "\n\($0)" } ?? ""))
-            it.rpcId = id; it.legacy = m == "execCommandApproval"
-            if !autoApprove { attention() }
+            let it = add(.approval, "Выполнить: " + cleanCommand(cmd) + ((p["reason"] as? String).map { "\n\($0)" } ?? ""))
+            it.rpcId = id; it.legacy = m == "execCommandApproval"; card = it
         case "item/fileChange/requestApproval", "applyPatchApproval":
             let it = add(.approval, "Изменить файлы" + ((p["reason"] as? String).map { ": \($0)" } ?? ""))
-            it.rpcId = id; it.legacy = m == "applyPatchApproval"
+            it.rpcId = id; it.legacy = m == "applyPatchApproval"; it.rpcKind = "patch"; card = it
         case "mcpServer/elicitation/request":
             let server = (p["serverName"] as? String) ?? "MCP"
             let it = add(.approval, "\(server): " + ((p["message"] as? String) ?? "запрос разрешения"))
-            it.rpcId = id; it.rpcKind = "elicitation"; it.payload = p
-            if !autoApprove || Self.mcpConfirmationContent(p) == nil { attention() }
+            it.rpcId = id; it.rpcKind = "elicitation"; it.payload = p; card = it
         case "item/permissions/requestApproval":
             let perms = (p["permissions"] as? JSON) ?? [:]
             var what: [String] = []
             if !(perms["network"] is NSNull), perms["network"] != nil { what.append("сеть") }
             if !(perms["fileSystem"] is NSNull), perms["fileSystem"] != nil { what.append("файлы вне песочницы") }
             let it = add(.approval, "Доп. права: " + (what.isEmpty ? "?" : what.joined(separator: ", ")) + ((p["reason"] as? String).map { "\n\($0)" } ?? ""))
-            it.rpcId = id; it.rpcKind = "permissions"; it.payload = perms
-            if !autoApprove { attention() }
+            it.rpcId = id; it.rpcKind = "permissions"; it.payload = perms; card = it
         case "item/tool/requestUserInput":
             presentQuestion(id: id, params: p)
+            return
         default:
             add(.note, "Codex прислал запрос \(m) — Пульт его пока не умеет, отклонил.")
             client?.reject(id, "Пульт не поддерживает \(m)")
+            return
         }
+        card?.rpcClient = client
         approvePendingIfEnabled()
+        if let it = card, it.decision == nil { onEvent?(self, .needsApproval(it)) }
     }
 
     func toggleAutoApprove() {
@@ -674,44 +795,69 @@ final class Chat: ObservableObject {
         return content
     }
 
-    private func attention() { if !(NSApp?.isActive ?? true) { NSApp.requestUserAttention(.criticalRequest) } }
-
     @discardableResult func presentQuestion(id: Any, params: JSON) -> Item {
         let item = add(.question, "Нужен твой ответ")
         item.rpcId = id; item.rpcKind = "question"; item.payload = params; item.questionClient = client
-        attention()
+        item.text = QuestionPayload.summary(params)
+        onEvent?(self, .needsAnswer(item))
         return item
     }
 
     func submitQuestion(_ item: Item) {
-        guard item.kind == .question, item.decision == nil, let id = item.rpcId,
-              let response = QuestionPayload.response(item.payload, answers: item.questionAnswers) else { return }
-        guard let client = client, item.questionClient === client else { add(.error, "Нет связи с исходной сессией Codex. Ответ ещё не отправлен."); return }
-        client.respond(id, result: response)
+        guard item.kind == .question, item.decision == nil else { return }
+        if let request = item.claudeRequest {
+            guard let response = QuestionPayload.claudeResponse(item.payload, answers: item.questionAnswers) else { return }
+            guard claudeProc?.isRunning == true else { item.decision = "expired"; objectWillChange.send(); return }
+            claudeControl(request, ["behavior": "allow", "updatedInput": response])
+        } else {
+            guard let id = item.rpcId, let response = QuestionPayload.response(item.payload, answers: item.questionAnswers) else { return }
+            guard let client = client, client.alive, item.questionClient === client else {
+                item.decision = "expired"; objectWillChange.send()
+                add(.error, "Сессия, которая задала вопрос, уже закрыта — ответ не отправлен. Напиши его обычным сообщением."); return
+            }
+            client.respond(id, result: response)
+        }
+        item.text = QuestionPayload.summary(item.payload, answers: item.questionAnswers)
         item.decision = "answered"
         item.questionAnswers = [:]
+        objectWillChange.send()
     }
 
     func answer(_ it: Item, _ choice: String) {     // accept / acceptForSession / decline
-        guard let id = it.rpcId, it.decision == nil else { return }
+        guard it.kind == .approval, it.decision == nil else { return }
+        defer { objectWillChange.send() }
+        if let request = it.claudeRequest {
+            guard claudeProc?.isRunning == true else { it.decision = "expired"; return }
+            it.decision = choice
+            if choice == "decline" { claudeControl(request, ["behavior": "deny", "message": "Пользователь отклонил это действие."]) }
+            else {
+                var reply: JSON = ["behavior": "allow", "updatedInput": it.payload["input"] ?? [String: Any]()]
+                if choice == "acceptForSession", let suggestions = it.payload["permission_suggestions"] as? [Any], !suggestions.isEmpty { reply["updatedPermissions"] = suggestions }
+                claudeControl(request, reply)
+            }
+            return
+        }
+        guard let id = it.rpcId else { return }
+        // Отвечаем только тому процессу, который спросил: после смены аккаунта старый запрос уже мёртв.
+        guard let source = it.rpcClient, source.alive, source === client else { it.decision = "expired"; return }
         it.decision = choice
         if it.rpcKind == "elicitation" {
-            client?.respond(id, result: ["action": choice == "decline" ? "decline" : "accept", "content": choice == "decline" ? NSNull() : (Self.mcpConfirmationContent(it.payload) ?? [:]), "_meta": NSNull()])
+            source.respond(id, result: ["action": choice == "decline" ? "decline" : "accept", "content": choice == "decline" ? NSNull() : (Self.mcpConfirmationContent(it.payload) ?? [:]), "_meta": NSNull()])
             return
         }
         if it.rpcKind == "permissions" {
-            if choice == "decline" { client?.respond(id, result: ["permissions": [String: Any](), "scope": "turn"]); return }
+            if choice == "decline" { source.respond(id, result: ["permissions": [String: Any](), "scope": "turn"]); return }
             var granted: JSON = [:]
             for k in ["network", "fileSystem"] where !(it.payload[k] is NSNull) && it.payload[k] != nil { granted[k] = it.payload[k] }
-            client?.respond(id, result: ["permissions": granted, "scope": choice == "acceptForSession" ? "session" : "turn"])
+            source.respond(id, result: ["permissions": granted, "scope": choice == "acceptForSession" ? "session" : "turn"])
             return
         }
         if it.legacy {
             let map: [String: Any] = ["accept": "approved", "acceptForSession": "approved_for_session",
                                       "decline": ["denied": ["rejection": "Отклонено пользователем"]]]
-            client?.respond(id, result: ["decision": map[choice] ?? "abort"])
+            source.respond(id, result: ["decision": map[choice] ?? "abort"])
         } else {
-            client?.respond(id, result: ["decision": choice])
+            source.respond(id, result: ["decision": choice])
         }
     }
 
@@ -747,6 +893,7 @@ final class Chat: ObservableObject {
     }
 
     func claudeSession() -> (id: String, resume: Bool) {
+        if claudeIsolatedSession == nil, !isPrimary { claudeIsolatedSession = UUID().uuidString.lowercased() }   // вкладки не делят один разговор
         if let id=claudeIsolatedSession { return (id,claudeSessionExists(id)) }
         let key = "claudeSession:" + cwd
         if let sid = UserDefaults.standard.string(forKey: key), claudeSessionExists(sid) { return (sid, true) }
@@ -755,34 +902,39 @@ final class Chat: ObservableObject {
         return (sid, false)
     }
 
-    /// Claude Code прямо в ленте: claude -p … --output-format stream-json, один разговор на проект.
+    /// Claude Code прямо в ленте. Двусторонний поток (stream-json): Claude может задавать вопросы
+    /// и просить разрешения посреди работы, а большой запрос не упирается в лимит аргументов.
     func sendClaude(_ text: String, echo: Bool = true) {
+        guard claudeProc?.isRunning != true else { return }
         var t = text
         if let seed=freshContextSeed { t = "История ветки (не повторяй старые действия):\n" + seed + "\n\nНовый запрос:\n" + t;freshContextSeed=nil
             if !freshContextImages.isEmpty { t += "\nВложения предыдущей истории: " + freshContextImages.joined(separator:", ");freshContextImages=[] }
         }
         let imgs = attachments; attachments = []
-        if !imgs.isEmpty { t += "\n\nКартинки: " + imgs.joined(separator: ", ") }
-        guard !t.isEmpty, claudeProc?.isRunning != true else { return }
+        if !imgs.isEmpty { t += "\n\nКартинки (прочитай файлы): " + imgs.joined(separator: ", ") }
+        guard !t.isEmpty else { return }
         if echo { let u = add(.user, text.isEmpty ? "(картинка)" : text); u.claude = true; u.images = imgs }
         let sid = claudeSession()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: claudeBin)
-        p.arguments = ["-p", t, "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-                       "--permission-mode", claudePermissionMode, sid.resume ? "--resume" : "--session-id", sid.id]
-        if let original = claudeForkFrom {
-            p.arguments = ["-p", t, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", claudePermissionMode, "--resume", original, "--fork-session", "--session-id", sid.id]
-            claudeForkFrom = nil
-        }
-        p.arguments? += ["--append-system-prompt", effectiveRules, "--settings", claudeFast ? "{\"fastMode\":true}" : "{\"fastMode\":false}"]
-        if !claudeModel.isEmpty { p.arguments? += ["--model", claudeModel] }
-        if let effort = claudeEffort { p.arguments? += ["--effort", effort] }
+        var args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+                    "--permission-prompt-tool", "stdio", "--permission-mode", claudePermissionMode]
+        if let original = claudeForkFrom { args += ["--resume", original, "--fork-session", "--session-id", sid.id]; claudeForkFrom = nil }
+        else { args += [sid.resume ? "--resume" : "--session-id", sid.id] }
+        args += ["--append-system-prompt", effectiveRules + claudeQuestionHint, "--settings", claudeFast ? "{\"fastMode\":true}" : "{\"fastMode\":false}"]
+        if !claudeModel.isEmpty { args += ["--model", claudeModel] }
+        for dir in claudeAddDirs { args += ["--add-dir", dir] }
+        if let effort = claudeEffort { args += ["--effort", effort] }
+        p.arguments = args
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = homeDir + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+        env.removeValue(forKey: "CLAUDECODE"); env.removeValue(forKey: "CLAUDE_CODE_ENTRYPOINT")
         env.merge(Proxy.shared.env) { _, n in n }
         p.environment = env
-        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+        let out = Pipe(), inp = Pipe(), err = Pipe()
+        p.standardOutput = out; p.standardError = err; p.standardInput = inp
+        let run = UUID(); claudeRun = run
         var buf = Data()
         out.fileHandleForReading.readabilityHandler = { [weak self] h in
             let d = h.availableData
@@ -790,30 +942,101 @@ final class Chat: ObservableObject {
             buf.append(d)
             while let nl = buf.firstIndex(of: 0x0A) {
                 let line = buf.subdata(in: buf.startIndex..<nl); buf.removeSubrange(buf.startIndex...nl)
-                if let o = (try? JSONSerialization.jsonObject(with: line)) as? JSON { DispatchQueue.main.async { self?.claudeEvent(o) } }
+                if let o = (try? JSONSerialization.jsonObject(with: line)) as? JSON {
+                    DispatchQueue.main.async { if self?.claudeRun == run { self?.claudeEvent(o) } }
+                }
             }
+        }
+        let tail = TailBuffer()
+        err.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            if d.isEmpty { h.readabilityHandler = nil; return }
+            tail.append(d)
         }
         p.terminationHandler = { [weak self] proc in
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                if self.busy, proc.terminationStatus != 0 { self.add(.error, "Claude завершился с кодом \(proc.terminationStatus)") }
-                self.busy = false; self.claudeText = nil; self.claudeProc = nil
-                if proc.terminationStatus != 0 { self.queuePaused = true }
+                guard let self = self, self.claudeRun == run else { return }
+                let interrupted = self.claudeInterrupted
+                let bad = proc.terminationStatus != 0
+                if interrupted { self.add(.note, "Прервано.") }
+                else if bad && !self.claudeFailed {
+                    let reason = tail.text
+                    self.add(.error, "Claude завершился с кодом \(proc.terminationStatus)" + (reason.isEmpty ? "" : ":\n" + reason))
+                }
+                let failed = !interrupted && (bad || self.claudeFailed)
+                for it in self.items where it.claudeRequest != nil && it.decision == nil { it.decision = "expired" }
+                self.claudeText = nil; self.claudeProc = nil; self.claudeInput = nil; self.claudeItems = [:]
+                self.busy = false
+                if bad || self.claudeFailed || interrupted { self.queuePaused = true }
+                if !interrupted { self.onEvent?(self, .finished(took: Date().timeIntervalSince(self.turnStarted ?? Date()), failed: failed)) }
+                self.telegramBound = false
                 self.loadThreads()
                 self.drainQueue()
             }
         }
-        busy = true; turnStarted = Date(); claudeText = nil
-        do { try p.run(); claudeProc = p } catch { busy = false; add(.error, "Не удалось запустить claude") }
+        busy = true; turnStarted = Date(); claudeText = nil; claudeInterrupted = false; claudeFailed = false
+        do { try p.run() } catch { busy = false; add(.error, "Не удалось запустить claude: " + error.localizedDescription); return }
+        claudeProc = p; claudeInput = inp.fileHandleForWriting
+        let message: JSON = ["type": "user", "message": ["role": "user", "content": t]]
+        if var data = try? JSONSerialization.data(withJSONObject: message) {
+            data.append(0x0A)
+            let handle = inp.fileHandleForWriting
+            DispatchQueue.global(qos: .userInitiated).async { try? handle.write(contentsOf: data) }
+        }
+    }
+
+    /// Ответ на управляющий запрос Claude (разрешение / вопрос).
+    func claudeControl(_ request: String, _ response: JSON) {
+        let reply: JSON = ["type": "control_response", "response": ["subtype": "success", "request_id": request, "response": response]]
+        guard let handle = claudeInput, var data = try? JSONSerialization.data(withJSONObject: reply) else { return }
+        data.append(0x0A)
+        try? handle.write(contentsOf: data)
+    }
+
+    private func claudeControlRequest(_ o: JSON) {
+        guard let request = o["request_id"] as? String, let body = o["request"] as? JSON else { return }
+        guard body["subtype"] as? String == "can_use_tool" else {
+            let reply: JSON = ["type": "control_response", "response": ["subtype": "error", "request_id": request, "error": "Пульт не поддерживает этот запрос"]]
+            if let handle = claudeInput, var data = try? JSONSerialization.data(withJSONObject: reply) { data.append(0x0A); try? handle.write(contentsOf: data) }
+            return
+        }
+        let tool = (body["tool_name"] as? String) ?? "tool"
+        let input = (body["input"] as? JSON) ?? [:]
+        if tool == "AskUserQuestion" {
+            let raw = (input["questions"] as? [JSON]) ?? []
+            let questions: [JSON] = raw.map { q in
+                var copy = q; copy["id"] = (q["question"] as? String) ?? UUID().uuidString; return copy
+            }
+            let item = add(.question, "")
+            item.claude = true; item.claudeRequest = request; item.rpcKind = "question"
+            item.payload = ["questions": questions, "claudeQuestions": raw]
+            item.text = QuestionPayload.summary(item.payload)
+            claudeText = nil
+            onEvent?(self, .needsAnswer(item))
+            return
+        }
+        let detail = (input["command"] as? String) ?? (input["file_path"] as? String) ?? (input["url"] as? String) ?? (input["pattern"] as? String) ?? ""
+        let item = add(.approval, "Claude · \(tool)" + (detail.isEmpty ? "" : ": " + detail))
+        item.claude = true; item.claudeRequest = request; item.payload = body
+        claudeText = nil
+        approvePendingIfEnabled()
+        if item.decision == nil { onEvent?(self, .needsApproval(item)) }
     }
 
     private func claudeEvent(_ o: JSON) {
         switch o["type"] as? String {
+        case "control_request": claudeControlRequest(o)
+        case "control_cancel_request":
+            if let request = o["request_id"] as? String, let item = items.last(where: { $0.claudeRequest == request && $0.decision == nil }) {
+                item.decision = "expired"; objectWillChange.send()
+            }
         case "system":
             if o["subtype"] as? String == "init", let commands = o["slash_commands"] as? [String] {
                 claudeCommands = commands.map { PultCommand(name: $0, detail: "Навык установленного Claude Code") }
+                UserDefaults.standard.set(commands, forKey: "claudeCommands")
             }
         case "stream_event":
+            guard o["parent_tool_use_id"] == nil || o["parent_tool_use_id"] is NSNull else { return }   // текст субагентов не смешиваем с ответом
             let ev = (o["event"] as? JSON) ?? [:]
             if ev["type"] as? String == "content_block_start", let b = ev["content_block"] as? JSON {
                 if b["type"] as? String == "text" { let i = add(.agent, ""); i.claude = true; claudeText = i }
@@ -829,7 +1052,7 @@ final class Chat: ObservableObject {
             for b in (((o["message"] as? JSON)?["content"]) as? [JSON]) ?? [] where b["type"] as? String == "tool_use" {
                 guard let id = b["id"] as? String, let i = claudeItems[id] else { continue }
                 let inp = (b["input"] as? JSON) ?? [:]
-                let arg = (inp["command"] as? String) ?? (inp["file_path"] as? String) ?? (inp["pattern"] as? String) ?? (inp["url"] as? String) ?? ""
+                let arg = (inp["command"] as? String) ?? (inp["file_path"] as? String) ?? (inp["pattern"] as? String) ?? (inp["url"] as? String) ?? (inp["description"] as? String) ?? ""
                 i.text = ((b["name"] as? String) ?? "tool") + (arg.isEmpty ? "" : ": " + arg)
             }
         case "user":
@@ -838,6 +1061,7 @@ final class Chat: ObservableObject {
                 let c = b["content"]
                 let text = (c as? String) ?? ((c as? [JSON]) ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
                 i.output = text; i.exitCode = (b["is_error"] as? Bool == true) ? 1 : 0; i.done = true
+                if i.text.hasPrefix("AskUserQuestion") { items.removeAll { $0 === i } }      // вопрос уже показан карточкой
             }
         case "result":
             if let usage = o["usage"] as? JSON {
@@ -846,9 +1070,11 @@ final class Chat: ObservableObject {
                 claudeCachedTokens = (usage["cache_read_input_tokens"] as? NSNumber)?.intValue
                 claudeUsage = usage.keys.sorted().compactMap { key in (usage[key] as? NSNumber).map { "\(key): \($0)" } }.joined(separator: "\n")
             }
-            busy = false; claudeText = nil
+            claudeText = nil
+            for i in claudeItems.values where !i.done { i.done = true }
             defer { dumpAutotest() }
-            if o["is_error"] as? Bool == true { queuePaused = true; add(.error, (o["result"] as? String) ?? "Claude: ошибка") }
+            if o["is_error"] as? Bool == true { claudeFailed = true; add(.error, (o["result"] as? String) ?? "Claude: ошибка") }
+            try? claudeInput?.close(); claudeInput = nil          // ход окончен — Claude завершится сам
         default: break
         }
     }
@@ -868,6 +1094,23 @@ final class Chat: ObservableObject {
 
     func resetClaude() { UserDefaults.standard.removeObject(forKey: "claudeSession:" + cwd) }
 }
+
+/// Хвост stderr запущенного процесса — чтобы показать причину ошибки, а не только код.
+final class TailBuffer {
+    private var data = Data()
+    private let lock = NSLock()
+    func append(_ d: Data) { lock.lock(); data.append(d); if data.count > 4000 { data = Data(data.suffix(4000)) }; lock.unlock() }
+    var text: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).suffix(4).joined(separator: "\n")
+    }
+}
+
+var codexQuestionHint: String {
+    guard UserDefaults.standard.object(forKey: "codexQuestions") as? Bool ?? true else { return "" }
+    return "\n\nЕсли не хватает решения пользователя (несколько разумных вариантов, неясная цель, риск сделать не то) — не гадай и не останавливайся с вопросом в тексте: вызови request_user_input с 2–4 короткими вариантами ответа (до трёх вопросов за раз). Не спрашивай то, что можно выяснить самому из кода и файлов."
+}
+let claudeQuestionHint = "\n\nЕсли не хватает решения пользователя (несколько разумных вариантов, неясная цель, риск сделать не то) — не гадай: задай вопрос инструментом AskUserQuestion с 2–4 короткими вариантами. Не спрашивай то, что можно выяснить самому из кода и файлов."
 
 func htmlEscape(_ s: String) -> String {
     s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
@@ -1036,6 +1279,51 @@ extension Chat {
                     if let error = response["error"] as? JSON { self.busy = false; self.add(.error, error["message"] as? String ?? "Не удалось запустить review") }
                 }
             }
+        case "exit", "quit": Workspace.shared.close(self)
+        case "title":
+            customTitle = argument.isEmpty ? nil : argument
+            add(.note, argument.isEmpty ? "Название сброшено." : "Название чата: " + argument)
+        case "chats":
+            add(.note, Workspace.shared.chats.enumerated().map { i, c in "⌘\(i + 1)  \(c.status.emoji) \(c.title) — \(c.status.label.lowercased()) · \(c.providerLabel)" }.joined(separator: "\n"))
+        case "approvals":
+            if ["on", "off"].contains(argument.lowercased()) { if autoApprove != (argument.lowercased() == "on") { toggleAutoApprove() } }
+            add(.note, "Подтверждать за меня: " + (autoApprove ? "включено — команды и правки идут без вопросов." : "выключено — каждое действие спрашивает разрешение.") + " /approvals on|off")
+        case "sandbox":
+            let modes = ["read-only", "workspace-write", "danger-full-access"]
+            if modes.contains(argument) { sandbox = argument; threadLoaded = false; add(.note, "Песочница: \(argument). Применится со следующего сообщения.") }
+            else { add(.note, "Песочница: \(sandbox)\n/sandbox " + modes.joined(separator: "|")) }
+        case "undo": undoLastTurn()
+        case "sh":
+            if argument.isEmpty { add(.note, "Использование: /sh команда (или просто !команда)") } else { runInlineCLI("/bin/zsh", ["-lc", argument]) }
+        case "add-dir":
+            let expanded = (argument as NSString).expandingTildeInPath
+            var directory: ObjCBool = false
+            if !claude { add(.note, "Для Codex доступ к другим папкам задаётся песочницей: /sandbox danger-full-access или /cd.") }
+            else if FileManager.default.fileExists(atPath: expanded, isDirectory: &directory), directory.boolValue {
+                if !claudeAddDirs.contains(expanded) { claudeAddDirs.append(expanded) }
+                add(.note, "Claude получит доступ к: " + claudeAddDirs.joined(separator: ", "))
+            } else { add(.error, "Папка не найдена: " + expanded) }
+        case "limits":
+            refreshAllLimits(force: true)
+            add(.note, accounts.enumerated().map { i, a in
+                let l = limits[a.home]
+                return "\(i == current && !claude ? "●" : " ") \(i + 1). \(a.name): 5ч " + (l?.five.map { "\(Int(100 - $0))%" } ?? "?") + " · неделя " + (l?.week.map { "\(Int(100 - $0))%" } ?? "?")
+            }.joined(separator: "\n") + "\n/switch номер — перейти на аккаунт")
+        case "switch":
+            guard let number = Int(argument), accounts.indices.contains(number - 1) else { add(.note, "Использование: /switch номер (список — /limits)"); return true }
+            guard !busy else { add(.note, "Сначала дождись ответа."); return true }
+            chooseCodex(number - 1); add(.note, "Аккаунт: " + accounts[number - 1].name)
+        case "multi":
+            if argument.isEmpty { add(.note, "Использование: /multi задача — главный агент раздаст её субагентам.") }
+            else { add(.user, argument); send(multiAgentPrompt + argument, echo: false) }
+        case "rules": showRules = true
+        case "telegram", "vless": showCommandSettings = true
+        case "bot": add(.note, "Настрой своего Telegram-бота: настройки → Telegram.")
+        case "update":
+            Updater.shared.check(manual: true)
+            add(.note, "Проверяю обновления… Результат — в настройках и в боковой панели.")
+        case "todos":
+            if let plan = items.last(where: { $0.isPlan }) { plan.serviceCollapsed = false; add(.note, plan.text) } else { add(.note, "Плана в этом разговоре пока нет.") }
         default: add(.note, "Эта команда недоступна через API текущего провайдера.")
         }
         return true

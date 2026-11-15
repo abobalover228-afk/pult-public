@@ -31,6 +31,10 @@ struct MessageQueueView: View {
                         if !message.images.isEmpty { Text("Вложений: \(message.images.count)").foregroundColor(.secondary) }
                     }
                     Spacer()
+                    if chat.canSteer, message.provider == "codex", message.context == chat.queueContext {
+                        Button("В текущий ход") { chat.steer(message) }.buttonStyle(.borderless)
+                            .help("Не ждать конца ответа: Codex увидит это сообщение прямо сейчас и учтёт в работе")
+                    }
                     Button("Отправить сейчас") { chat.sendQueuedNow(message) }
                         .buttonStyle(.borderless)
                         .disabled(message.provider != chat.target || message.directory != chat.cwd || message.context != chat.queueContext)

@@ -11,36 +11,46 @@ struct ModelChoice: Identifiable {
     let id: String
     let name: String
     let description: String
-}
-struct ModelChoicesView: View {
-    @ObservedObject var chat: Chat
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Модели Codex").font(.title2)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(chat.modelChoices) { model in
-                        Button {
-                            chat.model = model.id; chat.showModelChoices = false
-                            chat.add(.note, "Модель: " + model.name)
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(model.name)
-                                    Text(model.description).font(.caption).foregroundColor(.secondary)
-                                }
-                                Spacer()
-                                if chat.model == model.id { Image(systemName: "checkmark") }
-                            }.padding(8).contentShape(Rectangle())
-                        }.buttonStyle(.plain)
-                    }
-                }
-            }
-            Button("Закрыть") { chat.showModelChoices = false }
-        }.padding(20).frame(width: 540, height: 420)
-    }
+    var efforts: [String] = []
+    var defaultEffort: String? = nil
 }
 
+/// Модели Codex с сервера — один список на все чаты, загружается при подключении.
+final class ModelCatalog: ObservableObject {
+    static let shared = ModelCatalog()
+    @Published var codex: [ModelChoice] = []
+    @Published var loading = false
+    static let claude: [ModelChoice] = [
+        ModelChoice(id: "", name: "По умолчанию", description: "Как настроено в Claude Code"),
+        ModelChoice(id: "opus", name: "Opus", description: "Текущая Opus из установленного Claude Code"),
+        ModelChoice(id: "sonnet", name: "Sonnet", description: "Текущая Sonnet из установленного Claude Code"),
+        ModelChoice(id: "haiku", name: "Haiku", description: "Текущая Haiku из установленного Claude Code")
+    ]
+    static let claudeEfforts = ["low", "medium", "high", "xhigh", "max"]
+
+    func load(_ client: CodexClient?, force: Bool = false) {
+        guard let client = client, client.alive, !loading, force || codex.isEmpty else { return }
+        loading = true
+        func page(_ cursor: String?, _ collected: [ModelChoice]) {
+            var params: JSON = ["limit": 100]
+            if let cursor = cursor { params["cursor"] = cursor }
+            client.call("model/list", params) { [weak self] response in
+                guard let self = self else { return }
+                guard let result = response["result"] as? JSON else { self.loading = false; return }
+                let rows = ((result["data"] as? [JSON]) ?? []).compactMap { row -> ModelChoice? in
+                    guard let name = row["model"] as? String ?? row["id"] as? String, row["hidden"] as? Bool != true else { return nil }
+                    let efforts = ((row["supportedReasoningEfforts"] as? [JSON]) ?? []).compactMap { $0["reasoningEffort"] as? String }
+                    return ModelChoice(id: name, name: row["displayName"] as? String ?? name, description: row["description"] as? String ?? "",
+                                       efforts: efforts, defaultEffort: row["defaultReasoningEffort"] as? String)
+                }
+                let all = collected + rows
+                if let next = result["nextCursor"] as? String, next != cursor { page(next, all); return }
+                self.codex = all; self.loading = false
+            }
+        }
+        page(nil, [])
+    }
+}
 enum CommandWords {
     // Deliberately no shell expansion: CLI arguments cannot execute $(...), pipes or redirects.
     static func parse(_ input: String) throws -> [String] {
@@ -132,25 +142,8 @@ extension Chat {
         return commandList.filter { $0.name.hasPrefix(prefix) }
     }
     func showModelPicker() {
-        guard !busy else { add(.note, "Дождись окончания текущего ответа."); return }
-        guard let client = client else { add(.error, "Codex ещё не подключён."); return }
-        func load(_ cursor: String? = nil, collected: [ModelChoice] = []) {
-            var params: JSON = ["limit": 100]
-            if let cursor = cursor { params["cursor"] = cursor }
-            client.call("model/list", params) { [weak self] response in
-                guard let self = self else { return }
-                if let error = response["error"] as? JSON { self.add(.error, error["message"] as? String ?? "Не удалось получить модели"); return }
-                let result = response["result"] as? JSON ?? [:]
-                let choices = ((result["data"] as? [JSON]) ?? []).compactMap { row -> ModelChoice? in
-                    guard let name = row["model"] as? String ?? row["id"] as? String else { return nil }
-                    return ModelChoice(id: name, name: row["displayName"] as? String ?? name, description: row["description"] as? String ?? "")
-                }
-                let all = collected + choices
-                if let next = result["nextCursor"] as? String, next != cursor { load(next, collected: all); return }
-                self.modelChoices = all; self.showModelChoices = true
-            }
-        }
-        load()
+        ModelCatalog.shared.load(client)
+        showModelChoices = true                    // окно выбора модели у поля ввода
     }
 
     @discardableResult func handleIntegratedCommand(_ command: String, argument: String) -> Bool {

@@ -15,7 +15,7 @@ struct UserQuestionView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(item.decision == nil ? "Нужен твой ответ" : "Ответ отправлен").font(.headline).foregroundColor(accent)
+            Text(item.decision == nil ? "Нужен твой ответ" : item.decision == "expired" ? "Сессия закрыта — ответ не отправлен" : "Ответ отправлен").font(.headline).foregroundColor(accent)
             ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
                 if let id = question["id"] as? String {
                     VStack(alignment: .leading, spacing: 8) {
@@ -66,5 +66,26 @@ struct QuestionPayload {
             response[id] = ["answers": [answer]]
         }
         return ["answers": response]
+    }
+
+    /// Ответ для Claude (AskUserQuestion): исходные вопросы + словарь «вопрос → ответ».
+    static func claudeResponse(_ payload: JSON, answers: [String: String]) -> JSON? {
+        guard let questions = payload["questions"] as? [JSON], !questions.isEmpty else { return nil }
+        var result: [String: String] = [:]
+        for question in questions {
+            guard let id = question["id"] as? String,
+                  let answer = answers[id]?.trimmingCharacters(in: .whitespacesAndNewlines), !answer.isEmpty else { return nil }
+            result[(question["question"] as? String) ?? id] = answer
+        }
+        return ["questions": payload["claudeQuestions"] ?? questions, "answers": result]
+    }
+
+    /// Вопросы (и ответы, если уже даны) одним текстом — для истории, уведомлений и Telegram.
+    static func summary(_ payload: JSON, answers: [String: String] = [:]) -> String {
+        ((payload["questions"] as? [JSON]) ?? []).map { question in
+            let text = (question["question"] as? String) ?? "Вопрос"
+            guard let id = question["id"] as? String, let answer = answers[id], !answer.isEmpty else { return text }
+            return text + "\n→ " + answer
+        }.joined(separator: "\n\n")
     }
 }

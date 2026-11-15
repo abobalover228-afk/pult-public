@@ -1,11 +1,6 @@
 import AppKit
 import Foundation
 import SwiftUI
-final class TeamFake:TeamRequest {
-    var prompt="";var instructions="";var completion:((Result<String,APIProblem>)->Void)?;var cancelled=false
-    func start(prompt:String,instructions:String,completion:@escaping(Result<String,APIProblem>)->Void){self.prompt=prompt;self.instructions=instructions;self.completion=completion}
-    func cancel(){cancelled=true}
-}
 @main struct ConversationChecks {
  @MainActor static func main() throws {
     _=NSApplication.shared
@@ -53,22 +48,10 @@ final class TeamFake:TeamRequest {
     precondition(chat.restorePoint != nil && chat.pendingMessages.isEmpty && !LocalConversationStore.threads().isEmpty)
     chat.busy=false;chat.restoreEditedBranch()
     precondition(chat.items.contains{$0.text=="MUST NOT ENTER NEW CONTEXT"} && chat.pendingMessages.count==1 && chat.queuePaused)
-    // Independent coordinator + two real request slots + synthesis, partial failure, cancellation.
-    chat.target="codex";let team=TeamRun();var workers:[TeamFake]=[]
-    team.makeRequest={let f=TeamFake();workers.append(f);return f}
-    team.start(prompt:"task",chat:chat);precondition(workers.count==1 && team.running)
-    workers[0].completion?(.success(#"{"tasks":[{"title":"A","prompt":"independent A"},{"title":"B","prompt":"independent B"}]}"#))
-    precondition(workers.count==3 && workers[1] !== workers[2])
-    precondition(workers[1].prompt.contains("independent A") && workers[2].prompt.contains("independent B"))
-    workers[1].completion?(.success("result A"));workers[2].completion?(.failure(APIProblem(message:"failure B")))
-    precondition(workers.count==4 && workers[3].prompt.contains("result A") && workers[3].prompt.contains("failure B"))
-    workers[3].completion?(.success("partial synthesis"));precondition(!team.running && team.result=="partial synthesis")
-    let stopped=TeamRun();var pending:[TeamFake]=[];stopped.makeRequest={let f=TeamFake();pending.append(f);return f}
-    stopped.start(prompt:"cancel",chat:chat);stopped.cancel();pending[0].completion?(.success("late"));precondition(!stopped.running && pending[0].cancelled && stopped.result.isEmpty)
     // Native scrolling anchor stability under content growth above the viewport.
     let state=FollowState();state.following=false
     precondition(FollowState.preservedY(origin:500,old:["anchor":550],new:["anchor":750]) == 700)
     state.resume();precondition(state.following)
-    print("PASS: rules inheritance/persistence, stable pins, non-destructive folding, fast routing, clean edit branch and restore, separate team requests, partial failures/cancellation, native scroll anchor preservation")
+    print("PASS: rules inheritance/persistence, stable pins, non-destructive folding, fast routing, clean edit branch and restore, native scroll anchor preservation")
  }
 }

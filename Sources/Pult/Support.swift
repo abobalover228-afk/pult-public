@@ -1,4 +1,5 @@
 import Foundation
+
 enum Terminal {
     static func run(_ cmd: String) {
         let esc = cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
@@ -17,6 +18,8 @@ func notifyMac(_ title: String, _ text: String) {
     try? p.run()
 }
 
+/// VLESS только для процессов «Пульта»: локальный xray (HTTP-прокси 127.0.0.1:10809) и переменные окружения
+/// для запускаемых Codex/Claude. Ссылка: ~/Library/Application Support/PultPublic/vless.txt (600), xray: ~/Library/Application Support/PultPublic/bin/xray.
 final class Proxy: ObservableObject {
     static let shared = Proxy()
     static let dir = appDataDir
@@ -46,8 +49,9 @@ final class Proxy: ObservableObject {
     }
 
     func apply() {
+        let wasRunning = xray != nil
         xray?.terminate(); xray = nil
-        guard enabled else { status = "выключен"; return }
+        guard enabled else { status = "выключен"; if wasRunning { onChange?() }; return }
         guard available, let cfg = config() else { status = "нет xray или vless.txt"; return }
         let path = Proxy.dir + "/xray.json"
         FileManager.default.createFile(atPath: path, contents: cfg, attributes: [.posixPermissions: 0o600])
@@ -55,8 +59,17 @@ final class Proxy: ObservableObject {
         p.executableURL = URL(fileURLWithPath: Proxy.dir + "/bin/xray")
         p.arguments = ["run", "-c", path]
         p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-        do { try p.run(); xray = p; status = "включён · \(names[min(max(selected, 0), names.count - 1)])" } catch { status = "xray не запустился" }
+        let name = names.isEmpty ? "сервер" : names[min(max(selected, 0), names.count - 1)]
+        do { try p.run(); xray = p; status = "включён · \(name)" } catch { status = "xray не запустился" }
+        // xray мог упасть сразу (плохая ссылка, занят порт) — не показываем «включён» зря.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self = self, self.xray === p else { return }
+            if !p.isRunning { self.xray = nil; self.status = "xray упал при запуске — проверь ссылку в vless.txt" }
+            self.onChange?()
+        }
     }
+    /// Вызывается после включения/выключения: чаты и Telegram переподключаются через новую сеть.
+    var onChange: (() -> Void)?
 
     /// vless://uuid@host:port?type=tcp&security=reality&pbk=…&sni=…&sid=…&fp=…&flow=…#name → конфиг xray.
     func config() -> Data? {

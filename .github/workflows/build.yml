@@ -4,7 +4,7 @@ on:
   pull_request:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   macos:
     runs-on: macos-15
@@ -19,3 +19,14 @@ jobs:
           name: Pult-macOS
           path: Pult-macOS.zip
           if-no-files-found: error
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" Pult-macOS.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" Pult-macOS.zip --title "Пульт $GITHUB_REF_NAME" --notes-file RELEASE-2.0.md
+          fi

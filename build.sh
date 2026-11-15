@@ -20,9 +20,9 @@ make_app() {
 <key>CFBundleIdentifier</key><string>$identifier</string>
 <key>CFBundleExecutable</key><string>$executable</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.2.0</string>
+<key>CFBundleShortVersionString</key><string>2.0.0</string>
 <key>CFBundleIconFile</key><string>${executable}AppIcon.icns</string>
-<key>CFBundleVersion</key><string>1.2.0</string>
+<key>CFBundleVersion</key><string>2.0.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><$accessory/>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>pultpublic</string><key>CFBundleURLSchemes</key><array><string>pultpublic</string></array></dict></array>
@@ -32,6 +32,10 @@ make_app() {
 PLIST
 }
 make_app 'Пульт' Pult local.pultpublic.app false
+/usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string Диктовка задач голосом" 'dist/Пульт.app/Contents/Info.plist'
+/usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string Распознавание задач голосом" 'dist/Пульт.app/Contents/Info.plist'
+/usr/libexec/PlistBuddy -c "Add :PultCommit string $(git rev-parse --short HEAD)" 'dist/Пульт.app/Contents/Info.plist'
+/usr/libexec/PlistBuddy -c "Add :PultSource string $PWD" 'dist/Пульт.app/Contents/Info.plist'
 make_app 'Лимиты' Limits local.pultpublic.limits true
 /usr/libexec/PlistBuddy -c "Delete :CFBundleURLTypes" "dist/Лимиты.app/Contents/Info.plist"
 xcrun swiftc -target "$(uname -m)-apple-macos14.0" -O -parse-as-library -module-name Pult -module-cache-path "$CLANG_MODULE_CACHE_PATH" Sources/Pult/*.swift -o 'dist/Пульт.app/Contents/MacOS/Pult'
@@ -40,3 +44,11 @@ codesign --force --deep --sign - 'dist/Пульт.app'
 codesign --force --deep --sign - 'dist/Лимиты.app'
 ditto -c -k --keepParent dist Pult-macOS.zip
 printf '\nГотово: dist/Пульт.app и dist/Лимиты.app\n'
+
+if [[ "${1:-}" == "--install" ]]; then
+  target="${2:?Укажи путь приложения}"
+  [[ "$target" == *.app ]] || { echo 'Нужен путь .app'; exit 1; }
+  ditto 'dist/Пульт.app' "$target"
+  codesign --force --deep --sign - "$target"
+  codesign --verify --deep --strict "$target"
+fi

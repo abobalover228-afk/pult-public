@@ -28,7 +28,23 @@ struct PultCommand: Identifiable {
         .init(name: "plugins", detail: "Плагины: /plugins [search слово|install имя@маркет|remove]"),
         .init(name: "doctor", detail: "Диагностика CLI"),
         .init(name: "version", detail: "Версия выбранного CLI"),
-        .init(name: "stop", detail: "Прервать текущий ответ")
+        .init(name: "stop", detail: "Прервать текущий ответ"),
+        .init(name: "exit", detail: "Закрыть этот чат"),
+        .init(name: "quit", detail: "Закрыть этот чат"),
+        .init(name: "title", detail: "Название чата: /title текст"),
+        .init(name: "chats", detail: "Открытые чаты и их статусы"),
+        .init(name: "approvals", detail: "Подтверждать за меня: /approvals on|off"),
+        .init(name: "sandbox", detail: "Песочница: read-only|workspace-write|danger-full-access"),
+        .init(name: "sh", detail: "Выполнить команду в папке проекта: /sh ls (или !ls)"),
+        .init(name: "limits", detail: "Лимиты всех аккаунтов"),
+        .init(name: "switch", detail: "Перейти на аккаунт: /switch номер"),
+        .init(name: "multi", detail: "Мультиагент: /multi задача"),
+        .init(name: "rules", detail: "Правила приложения и чата"),
+        .init(name: "telegram", detail: "Управление из Telegram"),
+        .init(name: "vless", detail: "Настройки VLESS"),
+        .init(name: "bot", detail: "Панель торгового бота"),
+        .init(name: "update", detail: "Проверить обновления Пульта"),
+        .init(name: "todos", detail: "Показать текущий план")
     ]
     static let codex: [PultCommand] = [
         .init(name: "rename", detail: "Переименовать разговор: /rename название"),
@@ -36,14 +52,16 @@ struct PultCommand: Identifiable {
         .init(name: "archive", detail: "Архивировать разговор"),
         .init(name: "unarchive", detail: "Восстановить разговор: /unarchive ID"),
         .init(name: "apps", detail: "Подключённые приложения"),
-        .init(name: "review", detail: "Проверить изменения")
+        .init(name: "review", detail: "Проверить изменения"),
+        .init(name: "undo", detail: "Убрать последний ход из разговора")
     ]
     static let claude: [PultCommand] = [
         .init(name: "cost", detail: "Расход токенов последнего хода"),
         .init(name: "memory", detail: "Открыть CLAUDE.md"),
         .init(name: "agents", detail: "Список агентов Claude Code"),
         .init(name: "plugin", detail: "Плагины: /plugins [search слово|install имя@маркет|remove]"),
-        .init(name: "context", detail: "Информация о контексте")
+        .init(name: "context", detail: "Информация о контексте"),
+        .init(name: "add-dir", detail: "Дать Claude доступ к ещё одной папке")
     ]
     static func matches(_ draft: String, provider: String) -> [PultCommand] {
         guard draft.hasPrefix("/"), !draft.contains(where: { $0.isWhitespace }) else { return [] }

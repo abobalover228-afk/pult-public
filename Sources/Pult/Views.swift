@@ -120,21 +120,23 @@ struct ItemView: View {
             UserQuestionView(item: it, chat: chat)
         case .approval:
             VStack(alignment: .leading, spacing: 8) {
-                Text("Нужно разрешение").bold().foregroundColor(accent)
+                Label(it.decision == nil ? "Нужно разрешение" : "Разрешение", systemImage: "lock.shield").font(.system(size: 12.5, weight: .semibold)).foregroundColor(it.decision == nil ? accent : .secondary)
                 Text(it.text).textSelection(.enabled)
                 if let d = it.decision {
-                    Text(d == "decline" ? "✗ отклонено" : "✓ разрешено").foregroundColor(d == "decline" ? .red : .green)
+                    Text(d == "decline" ? "✗ Отклонено" : d == "expired" ? "Запрос устарел — сессия, которая спрашивала, уже закрыта" : "✓ Разрешено")
+                        .font(monoSmall).foregroundColor(d == "decline" ? .red : d == "expired" ? .secondary : .green)
                 } else {
-                    HStack {
-                        Button("Да") { chat.answer(it, "accept") }.keyboardShortcut("y", modifiers: [])
-                        Button("Да, до конца сессии") { chat.answer(it, "acceptForSession") }
-                        Button("Нет") { chat.answer(it, "decline") }.keyboardShortcut("n", modifiers: [])
-                    }
+                    HStack(spacing: 8) {
+                        Button { chat.answer(it, "accept") } label: { Text("Разрешить").padding(.horizontal, 4) }.buttonStyle(.borderedProminent).tint(accent)
+                        Button("Разрешать до конца сессии") { chat.answer(it, "acceptForSession") }
+                        Button("Нет") { chat.answer(it, "decline") }
+                    }.controlSize(.regular).font(uiFont)
                 }
             }
-            .padding(10)
+            .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(accent, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 10).fill(accent.opacity(it.decision == nil ? 0.08 : 0)))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(it.decision == nil ? accent.opacity(0.8) : Color.white.opacity(0.1), lineWidth: 1))
         }
     }
 }
@@ -157,13 +159,14 @@ struct CopyButton: View {
 
 struct Spinner: View {
     let start: Date
+    var detail = ""
     private let frames = ["✻", "✶", "✳", "✢", "·", "✢", "✳", "✶"]
     var body: some View {
         TimelineView(.periodic(from: .now, by: 0.15)) { ctx in
             let t = ctx.date.timeIntervalSince(start)
             HStack(spacing: 8) {
                 Text(frames[Int(t / 0.15) % frames.count]).foregroundColor(accent)
-                Text("Работаю… \(Int(t))s · Esc — прервать").foregroundColor(accent)
+                Text("Работаю… " + (t >= 60 ? "\(Int(t) / 60)м \(Int(t) % 60)с" : "\(Int(t))с") + detail + " · Esc — прервать").foregroundColor(accent)
             }
         }
     }
@@ -176,65 +179,16 @@ final class UIState: ObservableObject {
     @Published var showBot = false
     @Published var showWallpaper = false
     @Published var showSettings = false
-    @Published var confirmTeam = false
     @Published var search = ""
+    @Published var showModel = false
+    @Published var multi = false
 }
 
 let relFmt: RelativeDateTimeFormatter = { let f = RelativeDateTimeFormatter(); f.locale = Locale(identifier: "ru_RU"); f.unitsStyle = .short; return f }()
 
-struct Sidebar: View {
-    @ObservedObject var chat: Chat
-    @ObservedObject var ui: UIState
-    @ObservedObject private var preferences = ConversationPreferences.shared
-    var list: [ThreadInfo] {
-        let q = ui.search.trimmingCharacters(in: .whitespaces).lowercased()
-        let filtered = q.isEmpty ? chat.threads : chat.threads.filter { $0.title.lowercased().contains(q) || $0.account.lowercased().contains(q) }
-        return filtered.sorted { a,b in
-            let ap=preferences.pins.contains(a.id),bp=preferences.pins.contains(b.id)
-            if ap != bp { return ap };return a.date > b.date
-        }
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Button { chat.showSidebar = false } label: { Image(systemName: "chevron.left") }.help("Свернуть вбок (⌘\\)")
-                Text("Диалоги").font(.system(size: 13, weight: .bold))
-                Spacer()
-                Button { chat.loadThreads() } label: { Image(systemName: "arrow.clockwise") }.help("Обновить")
-                Button { chat.newChat() } label: { Image(systemName: "square.and.pencil") }.help("Новый диалог")
-            }.buttonStyle(.borderless)
-            TextField("Поиск", text: $ui.search).textFieldStyle(.roundedBorder).font(.system(size: 12))
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(list) { t in
-                        if t.id == list.first(where: { !preferences.pins.contains($0.id) })?.id { Text("Остальные диалоги").font(.caption2).foregroundColor(.secondary) }
-                        if t.id == list.first?.id && preferences.pins.contains(t.id) { Text("Закреплённые").font(.caption2).foregroundColor(accent) }
-                        Button { chat.open(t) } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text((preferences.pins.contains(t.id) ? "📌 " : "") + t.title).lineLimit(2).font(.system(size: 12))
-                                Text("\(t.account) · " + (Date().timeIntervalSince(t.date) < 60 ? "сейчас" : relFmt.localizedString(for: t.date, relativeTo: Date())))
-                                    .font(.system(size: 10)).foregroundColor(.secondary)
-                            }
-                            .padding(.horizontal, 8).padding(.vertical, 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(t.id == chat.conversationKey ? accent.opacity(0.25) : Color.clear))
-                            .contentShape(Rectangle())
-                        }.buttonStyle(.plain)
-                        .contextMenu { Button(preferences.pins.contains(t.id) ? "Открепить" : "Закрепить сверху") { preferences.togglePin(t.id) } }
-                    }
-                    if list.isEmpty { Text(chat.threads.isEmpty ? "Загружаю…" : "Ничего не найдено").font(.system(size: 11)).foregroundColor(.secondary) }
-                }
-            }
-        }
-        .padding(10)
-        .frame(width: 270)
-        .background(Color(red: 0.065, green: 0.065, blue: 0.075))
-    }
-}
-
 final class PultWallpaper: ObservableObject {
     static let shared = PultWallpaper()
-    private let file = URL(fileURLWithPath: appDataDir + "/background-image")
+    private let file = URL(fileURLWithPath: homeDir + "/Library/Application Support/PultPublic/background-image")
     @Published var image: NSImage?
     @Published var dimming: Double = UserDefaults.standard.object(forKey: "backgroundDimming") as? Double ?? 0.65 {
         didSet { UserDefaults.standard.set(dimming, forKey: "backgroundDimming") }
@@ -324,346 +278,46 @@ struct ProviderIcon: View {
     }
 }
 
-struct ChatView: View {
-    @ObservedObject var chat: Chat
-    @ObservedObject var proxy = Proxy.shared
-    @StateObject private var ui = UIState()
-    @StateObject private var promptCoach = PromptCoach()
-    @StateObject private var follow = FollowState()
-    @ObservedObject private var preferences = ConversationPreferences.shared
-    @ObservedObject private var apiStore = APIConnectionStore.shared
+let multiAgentPrompt = """
+Работай как главный мультиагентной команды. Раздели задачу на независимые части и запусти на них субагентов параллельно \
+(Codex: spawn_agent, затем wait_agent; Claude: инструмент Agent, несколько вызовов в одном сообщении). \
+Каждому дай полное задание и свои файлы — два субагента не правят один файл. Мелочь делай сам. \
+Когда все закончат — проверь их работу (диффы, сборка/тесты), исправь ошибки и дай итог: что сделано, чем проверено, что нет.
 
-    func pct(_ a: Account) -> String { chat.remaining(a).map { "\(Int($0))%" } ?? "?" }
+Задача:
 
-    var topBar: some View {
-        HStack(spacing: 12) {
-            Button { chat.showSidebar.toggle() } label: { PultIcon(symbol: "sidebar.left") }
-                .buttonStyle(PultIconStyle(selected: chat.showSidebar)).accessibilityLabel("Показать диалоги")
-                .keyboardShortcut("\\", modifiers: .command).help("Диалоги (⌘\\)")
-            Text("✻ Пульт").bold().foregroundColor(accent)
-            Text(chat.items.contains(where: { $0.kind == .question && $0.decision == nil }) ? "Ждёт ответа" : (chat.busy ? "● Работает" : "Готов"))
-                .font(monoSmall).foregroundColor(chat.busy ? .green : .secondary)
-            Menu {
-                ForEach(Array(chat.accounts.enumerated()), id: \.offset) { i, a in
-                    Button((chat.target == "codex" && i == chat.current ? "● " : "   ") + a.name + " — осталось " + pct(a)) { chat.chooseCodex(i) }.disabled(chat.busy || chat.nativeCLIIsRunning)
-                }
-                Divider()
-                Button("Войти / открыть аккаунт в терминале…") {
-                    Terminal.run(shq(widgetDir + "open_codex.sh") + " " + shq(chat.account.home) + " " + shq(chat.account.name))
-                }
-                Button("Добавить аккаунт…") { Terminal.run(shq(widgetDir + "add_account.sh")) }
-                Button("Claude CLI") { chat.target = "claude" }.disabled(chat.busy || chat.nativeCLIIsRunning)
-                Divider()
-                ForEach(apiStore.connections) { connection in
-                    Button((chat.target == connection.target ? "● " : "") + connection.name + " · API") { chat.chooseAPI(connection) }.disabled(chat.busy || chat.nativeCLIIsRunning)
-                }
-                Button("Добавить / изменить API…") { chat.showAPIConnections = true }
-
-                Button("Обновить список и лимиты") { chat.accounts = loadAccounts(); chat.refreshAllLimits() }
-            } label: {
-                Text(chat.connecting && !chat.isAPI ? "подключаю…" : chat.isAPI ? chat.connectionTitle + " · API" : "\(chat.connectionTitle) · \(pct(chat.account))")
-            }
-            .menuStyle(.borderlessButton).fixedSize()
-            Spacer()
-            Button("Новый") { chat.newChat() }.keyboardShortcut("n")
-            Button { chat.askClaude() } label: { Text("✳ Claude").foregroundColor(accent) }
-                .help("Отдать этот диалог Codex Claude — он разберётся прямо здесь. Правый клик — ещё")
-                .disabled(chat.items.isEmpty || chat.busy)
-                .contextMenu {
-                    Button("Открыть разговор с Claude в Terminal") { chat.claudeInTerminal() }
-                    Button("Начать с Claude заново (новый разговор)") { chat.resetClaude() }
-                }
-            Button { ui.showWallpaper.toggle() } label: { PultIcon(symbol: "photo") }
-                .buttonStyle(PultIconStyle(selected: ui.showWallpaper)).accessibilityLabel("Фон окна")
-                .help("Настроить фон")
-                .popover(isPresented: $ui.showWallpaper) {
-                    WallpaperControls().padding(16).frame(width: 300)
-                }
-            Button { NSWorkspace.shared.open(URL(fileURLWithPath: Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("Лимиты.app").path)) } label: { PultIcon(symbol: "gauge.with.dots.needle.50percent") }
-                .buttonStyle(PultIconStyle()).help("Показать лимиты аккаунтов").accessibilityLabel("Лимиты аккаунтов")
-            Button { ui.showSettings = true } label: { PultIcon(symbol: "slider.horizontal.3") }
-                .buttonStyle(PultIconStyle()).help("Настройки Пульта").accessibilityLabel("Настройки Пульта")
-        }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 14).padding(.vertical, 9)
-    }
-
-    var statusLine: some View {
-        let l = chat.limits[chat.account.home]
-        let five = l?.five.map { "5ч \(Int(100 - $0))%" } ?? "5ч ?"
-        let week = l?.week.map { "нед \(Int(100 - $0))%" } ?? "нед ?"
-        let dir = chat.cwd.replacingOccurrences(of: homeDir, with: "~")
-        return HStack(spacing: 10) {
-            Text(chat.connectionTitle); Text("·"); Text(chat.isAPI ? (chat.selectedAPI?.model ?? "—") : chat.model); Text("·");
-            if chat.isAPI { Label("Квота API неизвестна", systemImage: "gauge.with.dots.needle.50percent") } else { Text(five); Text(week) }
-            Text("·"); Text(dir).lineLimit(1).truncationMode(.middle)
-            Spacer()
-            if proxy.enabled { Text("VLESS").foregroundColor(proxy.status.hasPrefix("включён") ? .green : .orange) }
-            if !chat.isAPI && chat.autoSwitch { Text("авто ⇄").foregroundColor(.secondary) }
-        }
-        .font(monoSmall).foregroundColor(.secondary)
-        .padding(.horizontal, 16).padding(.bottom, 8)
-    }
-
-    var body: some View {
-        HStack(spacing: 0) {
-            if chat.showSidebar { Sidebar(chat: chat, ui: ui); Divider().opacity(0.3) }
-            else {
-                Button { chat.showSidebar = true } label: {
-                    VStack(spacing: 10) {
-                        Image(systemName: "chevron.right")
-                        Text("Диалоги").font(.system(size: 11)).fixedSize().rotationEffect(.degrees(-90)).frame(width: 14, height: 60)
-                        Spacer()
-                    }.padding(.top, 14).frame(width: 22).frame(maxHeight: .infinity).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain).foregroundColor(.secondary).background(Color(red: 0.065, green: 0.065, blue: 0.075)).help("Показать диалоги")
-                Divider().opacity(0.3)
-            }
-            main
-            if chat.team.visible { TeamPanel(team:chat.team,chat:chat) }
-            if promptCoach.isOpen {
-                Divider().opacity(0.3)
-                PromptCoachView(coach: promptCoach, chat: chat, ui: ui)
-            }
-        }
-        .frame(minWidth: promptCoach.isOpen ? 1120 : 640)
-        .onDisappear { promptCoach.close() }
-        .background(PultBackground())
-        .preferredColorScheme(.dark)
-    }
-
-    var main: some View {
-        VStack(spacing: 0) {
-            topBar
-            Divider().opacity(0.3)
-            FollowingScroll(state:follow) {
-                VStack(alignment:.leading,spacing:12) {
-                    if chat.items.isEmpty { Text("Напиши задачу. API и CLI выбираются в меню аккаунтов.").foregroundColor(.secondary) }
-                    ForEach(chat.items.filter { !chat.focusedConversation || [.user,.agent,.error,.question,.approval].contains($0.kind) }) { item in ItemView(it:item,chat:chat).id(item.id)
-                            .background(GeometryReader { geometry in Color.clear.preference(key:MessagePositions.self,value:[item.id:geometry.frame(in:.named("conversation-document")).minY]) }) }
-                }.padding(16).frame(maxWidth:.infinity,alignment:.leading)
-                    .coordinateSpace(name:"conversation-document")
-                    .onPreferenceChange(MessagePositions.self){ follow.measurements?($0) }
-            }
-            if !follow.following {
-                Button { follow.resume() } label: { Label("К последним сообщениям · следить",systemImage:"arrow.down.to.line") }.buttonStyle(.borderless).padding(6).accessibilityLabel("Вернуться вниз и следить за ответом")
-            }
-            if chat.nativeCLIIsRunning {
-                HStack {
-                    ProgressView().controlSize(.small)
-                    Text("Выполняется команда CLI…").font(monoSmall)
-                    Button("Остановить") { chat.interrupt() }.buttonStyle(.borderless)
-                    Spacer()
-                }.padding(.horizontal, 16).padding(.bottom, 6)
-            }
-            if chat.busy, let s = chat.turnStarted { Spinner(start: s).padding(.horizontal, 16).padding(.bottom, 6).frame(maxWidth: .infinity, alignment: .leading) }
-            if !chat.attachments.isEmpty {
-                HStack { ForEach(chat.attachments, id: \.self) { p in
-                    HStack(spacing: 4) {
-                        Text("🖼 " + (p as NSString).lastPathComponent).font(monoSmall).lineLimit(1)
-                        Button("✕") { chat.attachments.removeAll { $0 == p } }.buttonStyle(.borderless)
-                    }.padding(.horizontal, 8).padding(.vertical, 3).background(Capsule().fill(Color.white.opacity(0.08)))
-                }; Spacer() }.padding(.horizontal, 14).padding(.bottom, 4)
-            }
-            if !chat.pendingMessages.isEmpty { MessageQueueView(chat: chat, ui: ui) }
-            if ui.draft.hasPrefix("/"), !ui.draft.contains(where: { $0.isWhitespace }), !ui.slashDismissed {
-                SlashSuggestions(chat: chat, ui: ui)
-            }
-            HStack(alignment: .top, spacing: 8) {
-                Button {
-                    if !chat.busy && !chat.nativeCLIIsRunning { chat.target = chat.target == "claude" ? "codex" : "claude" }
-                } label: {
-                    Group { if chat.isAPI { PultIcon(symbol: "network") } else { ProviderIcon(claude: chat.target == "claude") } }
-                        .frame(width: 24, height: 24).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(chat.target == "claude" ? "Claude → GPT" : "GPT → Claude")
-                Button { pickImages(chat) } label: { PultIcon(symbol: "paperclip") }.buttonStyle(PultIconStyle()).help("Картинка (или перетащи / ⇧⌘V)")
-                Button {
-                    promptCoach.open(draft: ui.draft, chat: chat)
-                } label: { PultIcon(symbol: "wand.and.stars") }
-                .buttonStyle(PultIconStyle(selected: promptCoach.isOpen))
-                .accessibilityLabel("Улучшить промпт")
-                .help("Суперпромпт: прочитать диалог, уточнить и улучшить запрос")
-                .disabled(ui.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || chat.busy || chat.connecting || chat.nativeCLIIsRunning)
-                Text(">").foregroundColor(chat.target == "claude" ? accent : .secondary)
-                TextField(chat.busy ? "добавить в очередь…" : (chat.isAPI ? "Напиши в API…" : chat.target == "claude" ? "Напиши Claude…" : "Напиши задачу…"), text: $ui.draft, axis: .vertical)
-                    .textFieldStyle(.plain).lineLimit(1...10)
-                    .onChange(of: ui.draft) { _ in ui.slashSelection = 0; ui.slashDismissed = false }
-                    .onKeyPress(.tab) {
-                        guard ui.draft.hasPrefix("/"), !ui.draft.contains(where: { $0.isWhitespace }) else { return .ignored }
-                        let matches = chat.matchingCommands(ui.draft)
-                        guard !matches.isEmpty else { return .ignored }
-                        ui.draft = "/" + matches[min(ui.slashSelection, matches.count - 1)].name + " "
-                        return .handled
-                    }
-                    .onKeyPress(.downArrow) {
-                        guard ui.draft.hasPrefix("/"), !ui.slashDismissed else { return .ignored }
-                        let count = chat.matchingCommands(ui.draft).count
-                        guard count > 0 else { return .ignored }
-                        ui.slashSelection = (ui.slashSelection + 1) % count
-                        return .handled
-                    }
-                    .onKeyPress(.upArrow) {
-                        guard ui.draft.hasPrefix("/"), !ui.slashDismissed else { return .ignored }
-                        let count = chat.matchingCommands(ui.draft).count
-                        guard count > 0 else { return .ignored }
-                        ui.slashSelection = (ui.slashSelection + count - 1) % count
-                        return .handled
-                    }
-                    .onSubmit {
-                        let matches = chat.matchingCommands(ui.draft)
-                        let exact = matches.contains { ui.draft == "/" + $0.name }
-                        if !matches.isEmpty, !exact, !ui.slashDismissed {
-                            ui.draft = "/" + matches[min(ui.slashSelection, matches.count - 1)].name + " "
-                        } else {
-                            let t = ui.draft; ui.draft = ""; chat.send(t)
-                        }
-                    }
-            }
-            .padding(10)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.25), lineWidth: 1))
-            .padding(.horizontal, 12).padding(.bottom, 6)
-            HStack {
-                Button { chat.toggleAutoApprove() } label: {
-                    Label("Подтверждать за меня" + (chat.autoApprove ? ": вкл" : ": выкл"),
-                          systemImage: chat.autoApprove ? "checkmark.shield.fill" : "checkmark.shield")
-                        .foregroundColor(chat.autoApprove ? .green : .secondary)
-                }
-                .buttonStyle(.borderless)
-                .help("Автоматически подтверждать команды, файлы, дополнительные права и обычные подтверждения MCP. Настройка сохраняется. Вопросы и ввод недостающих данных остаются ручными.")
-                Button { ui.confirmTeam=true } label: { Label("Группа GPT",systemImage:"person.3") }
-                    .disabled(chat.busy || chat.connecting || chat.nativeCLIIsRunning || chat.team.running || chat.target == "claude" || ui.draft.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
-                    .help("Главный и два независимых GPT: дополнительный расход лимитов. Только анализ")
-                Button { chat.showRules=true } label: { Label("Правила",systemImage:"text.badge.checkmark") }.help("Общие правила и переопределение текущего чата")
-                if chat.restorePoint != nil { Button("Восстановить до правки") { chat.restoreEditedBranch() }.disabled(chat.busy || chat.team.running) }
-                Text((chat.target == "claude" ? chat.claudeFast : chat.codexFast) && !chat.isAPI ? "⚡ Fast запрошен" : "").font(.caption).foregroundColor(accent)
-                Spacer()
-            }
-            .font(.system(size: 12))
-            .padding(.horizontal, 16).padding(.bottom, 6)
-            HStack(spacing: 12) {
-                let input = chat.target == "claude" ? chat.claudeInputTokens : chat.codexInputTokens
-                let output = chat.target == "claude" ? chat.claudeOutputTokens : chat.codexOutputTokens
-                let cached = chat.target == "claude" ? chat.claudeCachedTokens : chat.codexCachedTokens
-                Text((chat.isAPI ? "Токены API-запроса · вход: " : chat.target == "claude" ? "Токены хода · вход: " : "Токены диалога · вход: ") + (input.map(String.init) ?? "—"))
-                Text("выход: " + (output.map(String.init) ?? "—"))
-                Text("кэш: " + (cached.map(String.init) ?? "—"))
-                Spacer()
-            }.font(monoSmall).foregroundColor(.secondary).padding(.horizontal, 16).padding(.bottom, 5)
-            statusLine
-        }
-        .font(mono)
-        .preferredColorScheme(.dark)
-        .sheet(isPresented:$chat.showRules) { RulesEditor(chat:chat,preferences:preferences) }
-        .sheet(isPresented:Binding(get:{chat.editingItem != nil},set:{if !$0{chat.editingItem=nil}})) { EditMessageView(chat:chat) }
-        .confirmationDialog(chat.isAPI ? "Запустить до 4 платных API-запросов?" : "Запустить главного и двух GPT?",isPresented:$ui.confirmTeam) {
-            Button("Запустить группу · дополнительный расход") { chat.team.start(prompt:ui.draft,chat:chat) }
-            Button("Отмена",role:.cancel) {}
-        } message: { Text("Две независимые аналитические подзадачи и общий ответ. Исполнители не меняют файлы. Применение изменений остаётся основному диалогу. Claude CLI в этом режиме не поддерживается.") }
-        .onChange(of:chat.queueContext) { _ in chat.team.cancel();follow.resume() }
-        .onExitCommand {
-            if ui.draft.hasPrefix("/"), !ui.slashDismissed { ui.slashDismissed = true }
-            else { chat.interrupt() }
-        }
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            for pr in providers {
-                _ = pr.loadObject(ofClass: URL.self) { url, _ in
-                    guard let u = url, ["png", "jpg", "jpeg", "gif", "webp", "heic"].contains(u.pathExtension.lowercased()) else { return }
-                    DispatchQueue.main.async { chat.attachments.append(u.path) }
-                }
-            }
-            return true
-        }
-        .onChange(of: apiStore.revision) { _ in chat.apiConfigurationDidChange() }
-        .sheet(isPresented: $chat.showAPIConnections) { APIConnectionsView(store: apiStore, onSelect: { chat.chooseAPI($0) }, canSelect: !chat.busy && !chat.nativeCLIIsRunning) }
-        .onChange(of: chat.showCommandSettings) { show in if show { ui.showSettings = true; chat.showCommandSettings = false } }
-        .sheet(isPresented: $chat.showModelChoices) { ModelChoicesView(chat: chat) }
-        .sheet(isPresented: $chat.showClaudeConversations) { ClaudeConversationsView(chat: chat) }
-        .alert(item: $chat.pendingNativeAction) { action in
-            Alert(title: Text(action.title), message: Text(action.message), primaryButton: .destructive(Text("Выполнить")) { action.perform() }, secondaryButton: .cancel())
-        }
-        .sheet(isPresented: $ui.showSettings) { SettingsView(chat: chat, close: { ui.showSettings = false }) }
-    }
-}
-
-struct SettingsView: View {
-    @ObservedObject var wallpaper = PultWallpaper.shared
-    @ObservedObject var chat: Chat
-    @ObservedObject var proxy = Proxy.shared
-    let close: () -> Void
-
-    var body: some View {
-        Form {
-            Section("Картинка на фон") {
-                HStack {
-                    Button("Выбрать картинку…") { wallpaper.choose() }
-                    Button("Сбросить") { wallpaper.reset() }.disabled(wallpaper.image == nil)
-                }
-                if wallpaper.image != nil {
-                    HStack {
-                        Text("Затемнение")
-                        Slider(value: $wallpaper.dimming, in: 0.2...0.9)
-                        Text("\(Int(wallpaper.dimming * 100))%").monospacedDigit().frame(width: 40)
-                    }
-                }
-                Text("Картинка сохраняется в Пульте и остаётся после перезапуска.").font(.caption).foregroundColor(.secondary)
-            }
-            Section("Codex") {
-                TextField("Модель Codex", text: $chat.model)
-                TextField("Модель Claude (пусто — по умолчанию CLI)", text: $chat.claudeModel)
-                HStack {
-                    TextField("Рабочая папка", text: $chat.cwd)
-                    Button("…") {
-                        let p = NSOpenPanel(); p.canChooseDirectories = true; p.canChooseFiles = false
-                        if p.runModal() == .OK, let u = p.url { chat.cwd = u.path; chat.newChat() }
-                    }
-                }
-                Picker("Песочница", selection: $chat.sandbox) {
-                    Text("только чтение").tag("read-only")
-                    Text("запись в папке проекта").tag("workspace-write")
-                    Text("полный доступ").tag("danger-full-access")
-                }
-                Toggle("Авто-переключение аккаунтов (конец лимита и заранее на 5%)", isOn: $chat.autoSwitch)
-                Toggle("Уведомлять в macOS, если ход длился > 1 мин и окно не активно", isOn: $chat.notifyTelegram)
-            }
-            Section("VLESS только для Пульта") {
-                Toggle("Подключаться через VLESS", isOn: $proxy.enabled).disabled(!proxy.available && !proxy.enabled)
-                if proxy.names.count > 1 {
-                    Picker("Сервер", selection: $proxy.selected) {
-                        ForEach(Array(proxy.names.enumerated()), id: \.offset) { i, n in Text(n).tag(i) }
-                    }
-                }
-                Text("Статус: \(proxy.status)").foregroundColor(.secondary)
-                if !proxy.available {
-                    Text("Положи ссылку vless://… в ~/Library/Application Support/PultPublic/vless.txt — и включи. Действует только на Codex/Claude, запущенные из Пульта; после переключения выбери аккаунт заново.")
-                        .font(.caption).foregroundColor(.secondary)
-                }
-            }
-            HStack { Spacer(); Button("Готово", action: close).keyboardShortcut(.defaultAction) }
-        }
-        .formStyle(.grouped)
-        .padding()
-        .frame(width: 560, height: 650)
-    }
-}
+"""
 
 let attachDir = appDataDir + "/attachments"
 
-func pickImages(_ chat: Chat) {
-    let p = NSOpenPanel(); p.allowsMultipleSelection = true; p.allowedContentTypes = [.image]
-    if p.runModal() == .OK { chat.attachments += p.urls.map(\.path) }
+func pickFiles(_ chat: Chat) {
+    let p = NSOpenPanel(); p.allowsMultipleSelection = true; p.canChooseDirectories = true
+    if p.runModal() == .OK { chat.attachments += p.urls.map(\.path).filter { !chat.attachments.contains($0) } }
+}
+
+func isImagePath(_ path: String) -> Bool { ["png", "jpg", "jpeg", "gif", "webp", "heic"].contains((path as NSString).pathExtension.lowercased()) }
+
+/// Не-картинки идут путями: Codex/Claude читают их сами; API не видит диск — туда текст файла (до 100 КБ).
+func attachedFilesNote(_ paths: [String], inline: Bool) -> String {
+    "\n\nПрикреплённые файлы:\n" + paths.map { p in
+        guard inline, let d = FileManager.default.contents(atPath: p), d.count <= 100_000, let s = String(data: d, encoding: .utf8) else { return "- " + p }
+        return "- \(p)\n```\n\(s)\n```"
+    }.joined(separator: "\n")
 }
 
 /// ⇧⌘V: картинка из буфера (скриншот) → файл → вложение.
 func pasteImage(_ chat: Chat) {
     let pb = NSPasteboard.general
     if let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL], !urls.isEmpty {
-        chat.attachments += urls.filter { NSImage(contentsOf: $0) != nil }.map(\.path); return
+        chat.attachments += urls.filter(\.isFileURL).map(\.path); return
     }
-    guard let img = NSImage(pasteboard: pb), let tiff = img.tiffRepresentation,
-          let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+    if let img = NSImage(pasteboard: pb) { saveAttachedImage(img, chat) }
+}
+
+/// Картинка без файла (буфер, перетаскивание из браузера/Telegram/Фото) → PNG во вложения.
+func saveAttachedImage(_ img: NSImage, _ chat: Chat) {
+    guard let tiff = img.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
     try? FileManager.default.createDirectory(atPath: attachDir, withIntermediateDirectories: true)
-    let path = attachDir + "/paste-\(Int(Date().timeIntervalSince1970)).png"
+    let path = attachDir + "/image-\(UUID().uuidString.prefix(8)).png"
     if (try? png.write(to: URL(fileURLWithPath: path))) != nil { chat.attachments.append(path) }
 }

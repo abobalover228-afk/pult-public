@@ -1,12 +1,6 @@
 import AppKit
 @main struct QueueChecks {
 static func main() {
- let defaults = UserDefaults.standard
- let previousTarget = defaults.object(forKey: "selectedConnection")
- defer {
-  if let previousTarget { defaults.set(previousTarget, forKey: "selectedConnection") }
-  else { defaults.removeObject(forKey: "selectedConnection") }
- }
  let chat = Chat(connectImmediately: false)
  chat.target = "codex"
  chat.busy = true

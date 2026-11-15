@@ -26,7 +26,7 @@ import SwiftUI
         precondition(answers?["b"]?["answers"] as? [String] == ["свой ответ"])
         item.questionAnswers = ["a": "Первый", "b": "ответ"]
         chat.submitQuestion(item)
-        precondition(item.decision == nil, "Disconnected client must keep the response pending")
+        precondition(item.decision == "expired", "Closed session must mark the question expired")
         precondition(!chat.transcript().contains("свой ответ"))
         let queued = Chat(connectImmediately: false)
         queued.target = "codex"

@@ -48,7 +48,7 @@ struct LocalConversation: Codable {
     var items: [SavedChatItem]
 }
 enum LocalConversationStore {
-    static var directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/PultConversations")
+    static var directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/PultPublic/conversations")
     static func save(_ value: LocalConversation) throws {
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
         let file=directory.appendingPathComponent(value.id.uuidString+".json")
@@ -90,7 +90,7 @@ extension Chat {
         catch { add(.error,"Не удалось сохранить ветку разговора на диск.") }
     }
     func openLocalBranch(_ thread:ThreadInfo) {
-        guard !busy,!nativeCLIIsRunning,!team.running else { add(.note,"Сначала останови текущую работу.");return }
+        guard !busy,!nativeCLIIsRunning else { add(.note,"Сначала останови текущую работу.");return }
         do {
             let value=try LocalConversationStore.read(thread.path)
             newChat();target=value.provider;cwd=value.directory
@@ -101,21 +101,9 @@ extension Chat {
             if target == "codex" && connectBranches { connect(current) }
         } catch { add(.error,"Не удалось прочитать сохранённую ветку.") }
     }
-    func integrateTeamResult(_ text:String) {
-        guard !busy,!nativeCLIIsRunning,team.contextID == queueContext else{return}
-        let oldKey=conversationKey
-        if localConversationID == nil { localConversationID=UUID() }
-        add(.agent,text)
-        preferences.copyOverride(from:oldKey,to:conversationKey)
-        if !isAPI {
-            freshContextSeed=PromptSnapshot.history(items);freshContextImages=items.flatMap(\.images)
-            detachThreadForBranch();claudeIsolatedSession=UUID().uuidString.lowercased()
-        }
-        saveLocalBranch();loadThreads()
-    }
     func beginEdit(_ item:Item) { guard item.kind == .user else{return};editingItem=item;editingText=item.text;editingImages=item.images }
     func editAndContinue() {
-        guard let item=editingItem,let index=items.firstIndex(where:{$0 === item}),!busy,!nativeCLIIsRunning,!team.running else{return}
+        guard let item=editingItem,let index=items.firstIndex(where:{$0 === item}),!busy,!nativeCLIIsRunning else{return}
         let text=editingText.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !text.isEmpty || !editingImages.isEmpty else{return}
         let previous=LocalConversation(id:UUID(),date:Date(),provider:target,directory:cwd,accountHome:account.home,title:"До редактирования · "+String(item.text.prefix(90)),items:items.map(SavedChatItem.init))
@@ -133,7 +121,7 @@ extension Chat {
         send(text)
     }
     func restoreEditedBranch() {
-        guard !busy,!nativeCLIIsRunning,!team.running,let value=restorePoint else{return}
+        guard !busy,!nativeCLIIsRunning,let value=restorePoint else{return}
         saveLocalBranch();newChat();target=value.provider;cwd=value.directory;localConversationID=value.id
         if let idx=accounts.firstIndex(where:{$0.home == value.accountHome}) { current=idx }
         items=value.items.map{$0.item()};rebuildItemIndex();freshContextSeed=PromptSnapshot.history(items);freshContextImages=items.flatMap(\.images)
@@ -176,8 +164,8 @@ struct EditMessageView:View {
             TextEditor(text:$chat.editingText).frame(minHeight:160)
             ForEach(chat.editingImages,id:\.self) { path in HStack { Text((path as NSString).lastPathComponent);Spacer();Button("Убрать"){chat.editingImages.removeAll{$0 == path}} } }
             Text("Последующее продолжение будет исключено из нового контекста и сохранено отдельной веткой. Уже выполненные команды и внешние действия не отменяются и сами не повторяются. Очередь сохранится для восстановления, но не уйдёт в новую ветку.").font(.caption).foregroundColor(.secondary)
-            if chat.busy || chat.nativeCLIIsRunning || chat.team.running { Text("Сначала останови генерацию и дождись завершения.").foregroundColor(.orange);Button("Остановить"){chat.interrupt();chat.team.cancel()} }
-            HStack { Button("Отмена"){chat.editingItem=nil};Spacer();Button("Сохранить старую ветку и продолжить"){chat.editAndContinue()}.disabled(chat.busy || chat.nativeCLIIsRunning || chat.team.running || (chat.editingText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && chat.editingImages.isEmpty)) }
+            if chat.busy || chat.nativeCLIIsRunning { Text("Сначала останови генерацию и дождись завершения.").foregroundColor(.orange);Button("Остановить"){chat.interrupt()} }
+            HStack { Button("Отмена"){chat.editingItem=nil};Spacer();Button("Сохранить старую ветку и продолжить"){chat.editAndContinue()}.disabled(chat.busy || chat.nativeCLIIsRunning || (chat.editingText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && chat.editingImages.isEmpty)) }
         }.padding(20).frame(width:600)
     }
 }

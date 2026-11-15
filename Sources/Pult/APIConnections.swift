@@ -91,7 +91,7 @@ struct KeychainVault: APIKeyVault {
 
 final class APIConnectionStore: ObservableObject {
     static let shared = APIConnectionStore()
-    static let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/PultConnections")
+    static let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/PultPublic/connections")
     @Published private(set) var connections: [APIConnection] = []
     @Published private(set) var loadError: String?
     @Published private(set) var revision = 0
