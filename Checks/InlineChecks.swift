@@ -5,6 +5,7 @@ import SwiftUI
     @MainActor static func main() {
         _ = NSApplication.shared
         let chat = Chat(connectImmediately: false)
+        chat.target = "codex"
         precondition(!chat.handleSlash("обычное сообщение"))
         precondition(!chat.handleSlash("/tmp/file.txt посмотри файл"))
         precondition(chat.handleSlash("/definitely-unknown"))

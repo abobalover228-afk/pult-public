@@ -5,6 +5,7 @@ import SwiftUI
     @MainActor static func main() async throws {
         _ = NSApplication.shared
         let chat = Chat(connectImmediately: false)
+        chat.target = "codex"
         let client = CodexClient(home: "/tmp/pult-fake-account")
         var requests: [JSON] = []
         client.requestTransport = { request in
@@ -13,6 +14,8 @@ import SwiftUI
             var result: JSON = [:]
             if request["method"] as? String == "model/list" {
                 result = ["data": [["id": "test-model", "model": "test-model", "displayName": "Test", "description": "Fixture"]], "nextCursor": NSNull()]
+            } else if request["method"] as? String == "plugin/list" {
+                result = ["marketplaces": [["name": "fixture-market", "plugins": [["id": "sample@fixture-market", "name": "sample", "installed": false]]]]]
             }
             client.handle(["id": id, "result": result])
         }
@@ -30,11 +33,21 @@ import SwiftUI
         chat.handleSlash("/mcp reload")
         precondition(requests.last?["method"] as? String == "config/mcpServer/reload")
         chat.handleSlash("/plugins install sample")
+        precondition(requests[requests.count - 2]["method"] as? String == "plugin/list")
+        precondition((requests[requests.count - 2]["params"] as? JSON)?["cwds"] as? [String] == [chat.cwd])
         precondition(requests.last?["method"] as? String == "plugin/install")
+        let installParams = requests.last?["params"] as? JSON
+        precondition(installParams?["pluginName"] as? String == "sample")
+        precondition(installParams?["remoteMarketplaceName"] as? String == "fixture-market")
+        precondition(installParams?["marketplacePath"] == nil)
+        precondition(UUID(uuidString: installParams?["installAttemptId"] as? String ?? "") != nil)
+        let beforeRemove = requests.count
         chat.handleSlash("/plugins remove sample")
         precondition(chat.pendingNativeAction != nil)
+        precondition(requests.count == beforeRemove, "Uninstall must wait for confirmation")
         chat.pendingNativeAction?.perform()
         precondition(requests.last?["method"] as? String == "plugin/uninstall")
+        precondition((requests.last?["params"] as? JSON)?["pluginId"] as? String == "sample")
         chat.handleSlash("/skills disable /tmp/SKILL.md")
         precondition(requests.last?["method"] as? String == "skills/config/write")
         precondition((requests.last?["params"] as? JSON)?["enabled"] as? Bool == false)

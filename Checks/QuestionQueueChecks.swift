@@ -29,6 +29,7 @@ import SwiftUI
         precondition(item.decision == nil, "Disconnected client must keep the response pending")
         precondition(!chat.transcript().contains("свой ответ"))
         let queued = Chat(connectImmediately: false)
+        queued.target = "codex"
         queued.busy = true; queued.attachments = ["/tmp/picture.png"]
         queued.send("первое"); queued.send("второе")
         precondition(queued.pendingMessages.map(\.text) == ["первое", "второе"])
