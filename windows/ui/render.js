@@ -63,3 +63,14 @@ export function icon(name) {
 export function iconButton(name, label, action, text = '') {
   const b=button('',action);b.setAttribute('aria-label',label);b.title=label;b.append(icon(name));if(text)b.append(document.createTextNode(text));return b;
 }
+
+// Кольца лимита: внешнее — 5 часов, внутреннее — неделя, в центре — меньший остаток. Общие для окна Пульта и дока.
+export const tone = v => !Number.isFinite(v) ? 'unknown' : v < 10 ? 'low' : v < 30 ? 'mid' : 'ok';
+export function rings(outer, inner, center) {
+  const R = [30, 21], C = R.map(r => 2 * Math.PI * r);
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('viewBox', '0 0 72 72'); svg.classList.add('dk-rings');
+  svg.innerHTML = R.map((r, i) => `<circle cx="36" cy="36" r="${r}" class="track t${i}"/><circle cx="36" cy="36" r="${r}" class="arc a${i} ${tone([outer, inner][i])}" stroke-dasharray="${C[i]}" stroke-dashoffset="${C[i]}"/>`).join('')
+    + `<text x="36" y="40.5" class="${tone(Math.min(...[outer, inner].filter(Number.isFinite)))}">${center}</text>`;
+  requestAnimationFrame(() => [outer, inner].forEach((v, i) => { if (Number.isFinite(v)) svg.querySelector('.a' + i).style.strokeDashoffset = String(C[i] * (1 - Math.max(0, Math.min(100, v)) / 100)); }));
+  return svg;
+}

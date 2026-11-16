@@ -66,6 +66,33 @@ class SignalingChecks(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close()
 
+    def test_relay_is_opt_in_and_addressed(self):
+        _, room = self.request("/v1/rooms", {})
+        self.request("join", {}, room=room)
+        opaque = base64.b64encode(b"sealed-room-packet").decode()
+        self.assertEqual(self.request("join", {}, room=room, peer="B" * 24)[1]["relay"], False)
+        self.assertEqual(self.request("relay", {"recipient": "B" * 24, "box": opaque}, room=room)[0], 404)
+        self.assertEqual(self.request("/health")[1], {"ok": True, "mode": "signaling-only", "create": "open"})
+        server = create_server(port=0, relay=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        saved, self.url = self.url, "http://127.0.0.1:" + str(server.server_address[1])
+        try:
+            self.assertEqual(self.request("/health")[1]["mode"], "relay")
+            _, room = self.request("/v1/rooms", {})
+            self.request("join", {}, room=room)
+            _, bob = self.request("join", {}, room=room, peer="B" * 24)
+            _, eve = self.request("join", {}, room=room, peer="C" * 24)
+            self.assertTrue(bob["relay"])
+            self.assertEqual(self.request("relay", {"recipient": "B" * 24, "box": opaque}, room=room)[0], 200)
+            _, events = self.request("events?after=" + str(eve["cursor"]), room=room, peer="B" * 24)
+            self.assertEqual([(e["kind"], e["sender"], e["box"]) for e in events["events"]], [("relay", "A" * 24, opaque)])
+            self.assertEqual(self.request("relay", {"recipient": "Z" * 24, "box": opaque}, room=room)[0], 400)
+            self.assertEqual(self.request("relay", {"recipient": "B" * 24, "box": "x" * 48_001}, room=room)[0], 400)
+            self.assertEqual(self.request("relay", {"recipient": "B" * 24, "text": "PLAIN"}, room=room)[0], 400)
+        finally:
+            self.url = saved
+            server.shutdown(); server.server_close()
+
     def test_limits_and_membership(self):
         _, room = self.request("/v1/rooms", {})
         for number in range(8):

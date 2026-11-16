@@ -2,6 +2,7 @@
 // Каждый модуль: `pub fn init(&AppHandle)` и `pub async fn call(&AppHandle, &str, Value) -> Result<Value, String>`.
 // События в интерфейс: `app.emit("<module>", json)`. Своё состояние модуль держит в static.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod accounts;
 mod api;
 mod claude;
 mod codex;
@@ -34,6 +35,7 @@ async fn call(app: AppHandle, module: String, method: String, args: Value) -> Re
         "updater" => updater::call(&app, &method, args).await,
         "support" => support::call(&app, &method, args).await,
         "limits" => limits::call(&app, &method, args).await,
+        "accounts" => accounts::call(&app, &method, args).await,
         _ => Err(format!("нет модуля {module}")),
     }
 }

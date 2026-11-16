@@ -71,12 +71,14 @@ async function mockRoomUI(page) {
   window.teamCalls = []; window.fixtureBoard = {revision:1,tasks:[],repository:'https://github.com/test/project'};
   window.hostID = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
   window.__TAURI__ = {event:{listen:async()=>()=>{}},core:{invoke:async(_,r)=>{
+   if(r.module==='app'&&r.method==='get'&&r.args.key==='team.server')return 'https://example.test';
    if(r.module==='app')return ({accounts:[],info:{home:'/tmp',os:'windows'},settings:{}})[r.method]??null;
    if(r.method==='threads'||(r.module==='api'&&r.method==='list'))return [];
    if(r.module==='team'){
     window.teamCalls.push(r);
     if(r.method==='saved')return {identity:window.hostID};
-    if(r.method==='outbox')return [];
+    if(r.method==='outbox'||r.method==='history')return [];
+    if(r.method==='token')return {set:false};
     if(r.method==='board'){
      if(r.args.request.action==='add'){window.fixtureBoard.tasks.push({...r.args.request.task,result:''});window.fixtureBoard.revision++;}
      return {snapshot:structuredClone(window.fixtureBoard),response:r.args.request.id};
@@ -100,8 +102,9 @@ async function mockRoomUI(page) {
 
 test('team SDK methods reach the room and reject invalid or unconfirmed work',async({page})=>{
  await mockRoomUI(page);
- await page.getByRole('button',{name:'Создать комнату',exact:true}).click();
- await page.getByRole('button',{name:'Войти по приглашению',exact:true}).click();
+ await page.getByPlaceholder('Как тебя увидит кент').fill('Алиса');
+ await page.getByRole('button',{name:'Позвать кента',exact:true}).click();
+ await expect.poll(()=>page.evaluate(async()=>(await import('/core.js')).ui.team.state().ready)).toBe(true);
  const result=await page.evaluate(async()=>{
   const {ui}=await import('/core.js'),mod={modID:'fixture',name:'Fixture'};
   await ui.team.modCall('team.addTask',{title:'SDK task',detail:'Task detail'},mod);
@@ -118,15 +121,53 @@ test('team SDK methods reach the room and reject invalid or unconfirmed work',as
 
 test('pasting another invitation after creation never adopts its host identity',async({page})=>{
  await mockRoomUI(page);
- await page.getByRole('button',{name:'Создать комнату',exact:true}).click();
+ await page.getByPlaceholder('Как тебя увидит кент').fill('Алиса');
+ await page.getByRole('button',{name:'Позвать кента',exact:true}).click();
+ await expect.poll(()=>page.evaluate(async()=>(await import('/core.js')).ui.team.connected())).toBe(true);
+ await page.getByTitle('Настройки комнаты').click();
+ await page.getByRole('button',{name:'Выйти из комнаты',exact:true}).click();
  const foreign=await page.evaluate(()=>{
   const v={server:'https://example.test',room:'z'.repeat(24),access:'b'.repeat(24),key:btoa(String.fromCharCode(...new Uint8Array(32))),coordinator:'BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB'};
   return 'pult-room:'+btoa(JSON.stringify(v));
  });
- await page.getByPlaceholder('Приглашение комнаты').fill(foreign);
- await page.getByRole('button',{name:'Войти по приглашению',exact:true}).click();
+ await page.getByPlaceholder('Вставь приглашение от кента').fill(foreign);
+ await page.getByRole('button',{name:'Войти',exact:true}).click();
+ await expect.poll(()=>page.evaluate(async()=>(await import('/core.js')).ui.team.connected())).toBe(true);
  expect(await page.evaluate(async()=>{
   const {ui}=await import('/core.js');let rejected=false;try{await ui.team.modCall('team.addTask',{title:'Task'},{name:'Fixture'});}catch{rejected=true;}
   return {identity:ui.team.state().identity,ready:ui.team.state().ready,rejected};
  })).toEqual({identity:'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA',ready:false,rejected:true});
+});
+
+test('two peers that cannot connect directly talk through the encrypted server relay',async({browser,request})=>{
+ const {spawn}=await import('node:child_process');
+ const server=spawn('python3',['../signaling/server.py'],{env:{...process.env,PULT_SIGNAL_PORT:'18788',PULT_SIGNAL_RELAY:'1'},stdio:'ignore'});
+ try{
+  let created;
+  for(let i=0;i<50;i++){try{const response=await request.post('http://127.0.0.1:18788/v1/rooms',{data:{}});if(response.status()===201){created=await response.json();break;}}catch{}await new Promise(r=>setTimeout(r,100));}
+  expect(created).toBeTruthy();
+  const invite={server:'http://127.0.0.1:18788',...created,key:Buffer.alloc(32,9).toString('base64')};
+  const pages=[await browser.newPage(),await browser.newPage()];
+  for(let i=0;i<2;i++){
+   const page=pages[i];
+   await page.exposeFunction('roomRequest',async a=>{const response=await request.fetch(`${a.server}/v1/rooms/${a.room}/${a.action}${a.action==='events'?`?after=${a.cursor}`:''}`,{method:a.action==='events'?'GET':'POST',headers:{Authorization:`Bearer ${a.access}`,'X-Pult-Peer':a.identity},...(a.action!=='events'&&{data:a.body||{}})});if(!response.ok())throw Error('HTTP '+response.status());return response.json();});
+   await page.addInitScript(()=>window.__TAURI__={core:{invoke:async(_,a)=>a.module==='team'&&a.method==='http'?window.roomRequest(a.args):null},event:{listen:async()=>()=>{}}});
+   await page.goto('/');
+   await page.evaluate(async({invite,id})=>{const {DirectRoom}=await import('/team-transport.js');window.packets=[];window.opened=0;
+    // Прямой канал запрещён: никто не создаёт предложение WebRTC, связь должна пойти через сервер.
+    window.room=new DirectRoom(invite,id,{forceRelay:true,event:(s,p)=>window.packets.push(p),open:()=>window.opened++});
+    window.room.restore=null;window.room.messages=id.startsWith('A')?[{id:'H1',date:1,author:'Алиса',text:'История до входа'}]:[];
+    // ускоряем: не ждём 12 секунд перед приветствием
+    const peer=window.room.peer.bind(window.room);window.room.peer=async(p,o)=>{const r=await peer(p,o);setTimeout(()=>window.room.greet(p),200);return r;};
+    await window.room.start();},{invite,id:i===0?'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA':'BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB'});
+  }
+  await expect.poll(()=>Promise.all(pages.map(p=>p.evaluate(()=>window.room.reachable().length))),{timeout:20000}).toEqual([1,1]);
+  expect(await pages[0].evaluate(()=>window.room.usesRelay)).toBe(true);
+  await expect.poll(()=>pages[1].evaluate(()=>window.room.messages.some(m=>m.text==='История до входа')),{timeout:10000}).toBe(true);
+  expect(await pages[1].evaluate(()=>window.room.send({messages:[{id:'M2',date:2,author:'Боб',text:'Ответ через сервер 🦊'}]}))).toBe(true);
+  await expect.poll(()=>pages[0].evaluate(()=>window.room.messages.some(m=>m.text==='Ответ через сервер 🦊')),{timeout:10000}).toBe(true);
+  expect(await pages[0].evaluate(()=>window.room.event({snapshot:{revision:1,tasks:[],repository:'x'.repeat(120000)}}))).toBe(true);
+  await expect.poll(()=>pages[1].evaluate(()=>window.packets[0]?.snapshot?.repository.length),{timeout:15000}).toBe(120000);
+  for(const page of pages){await page.evaluate(()=>window.room.stop());await page.close();}
+ }finally{server.kill();}
 });

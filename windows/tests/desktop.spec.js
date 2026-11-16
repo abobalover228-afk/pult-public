@@ -17,6 +17,9 @@ async function desktop(page, label = 'main') {
           if (method === 'stop') window.computerEnabled = false;
           return { enabled: window.computerEnabled, supported: true, mcp: true };
         }
+        if (module === 'accounts' && method === 'list') return [{ name: 'Основной', home: 'C:\\Users\\test\\.codex', signedIn: true, email: 'main@example.com', plan: 'plus' }, { name: 'Запасной', home: 'C:\\Users\\test\\.codex-2', signedIn: false }];
+        if (module === 'accounts' && method === 'browsers') return { selected: 'auto', items: [{ name: 'Google Chrome', private: true }, { name: 'Safari', private: false }] };
+        if (module === 'accounts' && method === 'login') { window.loginCalls = (window.loginCalls || 0) + 1; return { id: 'L1', home: 'C:\\Users\\test\\.codex-3' }; }
         if (module === 'mcp') return method === 'list' ? [{ name: 'test-server', enabled: true }] : { ok: true };
         if (module === 'api') {
           if (method === 'list') return window.apiConnections;
@@ -101,14 +104,34 @@ test('approval is explicit and user input is returned to the requesting process'
   expect(await page.evaluate(() => window.calls.filter(c => c.method === 'respond').at(-1).args)).toMatchObject({ id: 46, result: { answers: { choice: { answers: ['Первый'] } } } });
 });
 
-test('limits window shows remaining quota and account controls', async ({ page }) => {
+test('accounts window signs in with a one-time code and adds the account by itself', async ({ page }) => {
   await desktop(page, 'accounts');
-  await expect(page.getByRole('heading', { name: 'Основной' })).toBeVisible();
-  await expect(page.getByRole('meter').first()).toHaveAttribute('aria-valuenow', '72');
-  await expect(page.getByText('9%', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '+ Аккаунт' }).click();
-  expect(await page.evaluate(() => window.calls.some(c => c.module === 'limits' && c.method === 'add'))).toBe(true);
-  await page.screenshot({ path: 'test-results/limits.png' });
+  await page.evaluate(() => { navigator.clipboard.writeText = async text => { window.copied = text; }; });
+  await expect(page.getByText('Аккаунты Codex')).toBeVisible();
+  await page.getByLabel('Браузер для входа').selectOption('default');
+  expect(await page.evaluate(() => window.calls.some(c => c.module === 'accounts' && c.method === 'browser' && c.args.name === 'default'))).toBe(true);
+  await page.getByLabel('Браузер для входа').selectOption('Google Chrome');
+  await expect(page.getByText('main@example.com · Plus')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Войти', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '+ Добавить аккаунт' }).click();
+  await expect.poll(() => page.evaluate(() => window.loginCalls)).toBe(1);
+  await page.evaluate(() => window.handlers.accounts({ payload: { id: 'L1', stage: 'code', url: 'https://auth.openai.com/codex/device', code: 'M98Q-ID862' } }));
+  await expect(page.getByText('auth.openai.com/codex/device')).toBeVisible();
+  await expect(page.locator('.ac-code b')).toHaveCount(9);
+  expect(await page.evaluate(() => window.copied)).toBe('M98Q-ID862');
+  expect(await page.evaluate(() => window.calls.some(c => c.module === 'accounts' && c.method === 'openPrivate' && c.args.url === 'https://auth.openai.com/codex/device'))).toBe(true);
+  await page.evaluate(() => window.handlers.accounts({ payload: { id: 'L1', stage: 'done', name: 'ivan', email: 'ivan@example.com', plan: 'plus' } }));
+  await expect(page.getByText('ivan · ivan@example.com · Plus')).toBeVisible();
+  await page.screenshot({ path: 'test-results/accounts.png' });
+});
+
+test('limits dock shows nested rings for every account and Claude', async ({ page }) => {
+  await desktop(page, 'limits');
+  await expect(page.locator('.dk-tile')).toHaveCount(2);
+  await expect(page.locator('.dk-tile').first()).toContainText('Основной');
+  await expect(page.locator('.dk-tile').first().locator('text')).toHaveText('72');
+  await expect(page.locator('.dk-tile.claude text')).toHaveText('9');
+  await expect.poll(() => page.evaluate(() => window.calls.some(c => c.module === 'limits' && c.method === 'fit' && c.args.width > 100))).toBe(true);
 });
 
 test('desktop layout fits a small Windows screen', async ({ page }) => {
@@ -479,7 +502,7 @@ test('editing creates a fresh context and preserves the source continuation and 
   const turn=window.calls.find(r=>r.args?.method==='turn/start');
   return {old:source.messages.at(-1).text,queue:source.queue.length,paused:source.queuePaused,fresh:fork.thread!=='source-thread',
    text:turn.args.params.input[0].text,visible:fork.messages.findLast(m=>m.kind==='user').text,
-   rules:window.calls.find(r=>r.args?.method==='thread/start').args.params.developerInstructions,
+   rules:window.calls.find(r=>r.args?.method==='thread/start').args.params.developerInstructions.replace(/^Ты работаешь внутри «Пульта».*?\n\n/s,''),
    saved:window.calls.some(r=>r.method==='saveLocal'&&r.args.value.thread==='source-thread')};
  });
  expect(result).toMatchObject({old:'Old continuation',queue:1,paused:true,fresh:true,visible:'Corrected task',rules:'Custom rules',saved:true});
@@ -495,10 +518,10 @@ test('changed rules detach the old provider context and pause queued work',async
   c.queue=[{text:'Old queued task',attachments:[]}];
   await ui.chats.send('New task',{chat:c,literal:true});
   const start=window.calls.find(r=>r.args?.method==='thread/start');const turn=window.calls.find(r=>r.args?.method==='turn/start');
-  return {newThread:c.thread,paused:c.queuePaused,queued:c.queue.length,rules:start.args.params.developerInstructions,text:turn.args.params.input[0].text,
+  return {newThread:c.thread,paused:c.queuePaused,queued:c.queue.length,rules:start.args.params.developerInstructions.replace(/^Ты работаешь внутри «Пульта».*?\n\n/s,''),pult:start.args.params.developerInstructions.includes('github.com/abobalover228-afk/pult-public'),text:turn.args.params.input[0].text,
    saved:window.calls.some(r=>r.method==='saveLocal'&&r.args.value.thread==='old-thread'&&r.args.value.messages.length===2)};
  });
- expect(result).toMatchObject({newThread:'thread-1',paused:true,queued:1,rules:'New rules',saved:true});
+ expect(result).toMatchObject({newThread:'thread-1',paused:true,queued:1,rules:'New rules',pult:true,saved:true});
  expect(result.text).toContain('Previous answer');expect(result.text).toContain('New task');
 });
 
@@ -558,10 +581,12 @@ test('clipboard images and native file drops attach locally without stealing ano
  expect(await page.evaluate(()=>window.calls.filter(r=>r.args?.method==='turn/start'||r.method==='send').length)).toBe(0);
 });
 
-test('Mac layout keeps chats and quotas in sidebar and model controls beside the composer',async({page})=>{
+test('Mac layout keeps chats in sidebar, quotas in the dock, and model controls beside the composer',async({page})=>{
  await page.setViewportSize({width:1100,height:760});await desktop(page);
  await expect(page.locator('.sidebar .tabs .tab')).toHaveCount(1);
- await expect(page.locator('.sidebar-quotas .account-quota')).toHaveCount(1);
+ await expect(page.locator('.sidebar-quotas')).toHaveCount(0);
+ await expect(page.locator('.ring-bar .ring-tile')).toHaveCount(2);
+ await expect(page.locator('.ring-bar .ring-tile').first()).toContainText('Основной');
  await expect(page.locator('.composer').getByLabel('Провайдер')).toBeVisible();
  await expect(page.locator('.composer').getByRole('button',{name:'Модели',exact:true})).toBeVisible();
  const main=page.locator('.workspace');

@@ -1,10 +1,19 @@
 import { call, on, ui, h, settings } from './core.js';
-import { markdown, basename, button, localFileTarget, icon, iconButton } from './render.js';
+import { markdown, basename, button, localFileTarget, icon, iconButton, rings } from './render.js';
 const chats = [], events = new EventTarget(), previews = new Map();
 const isImage = path => /\.(png|jpe?g|gif|webp|bmp)$/i.test(path);
 let active, accounts = [], info, prefs = {}, history = [], query = '', follow = true, showingTrash = false;
 const app = document.querySelector('#app'), threadList = h('div.thread-list'), tabs = h('div.tabs'), feed = h('div.feed');
 const title = h('strong', {}, 'Новый диалог'), status = h('span.status', {}, 'Готов');
+// Значок цели: видно, что агент работает под /goal, её статус и расход.
+const goalChip = h('button.goal-chip', { type: 'button', hidden: true, onclick: () => { composer.value = '/goal '; composer.focus(); } });
+function paintGoal() {
+  const g = active?.target === 'codex' ? active.goal : null; goalChip.hidden = !g; if (!g) return;
+  const label = { active: 'цель', paused: 'цель на паузе', completed: 'цель выполнена', budgetLimited: 'бюджет цели исчерпан' }[g.status] || 'цель';
+  goalChip.className = 'goal-chip ' + (g.status || 'active');
+  goalChip.replaceChildren(h('span.goal-ring'), h('span.goal-label', {}, label), h('span.goal-text', {}, g.objective || ''));
+  goalChip.title = `${g.objective}\n${g.tokensUsed ? Math.round(g.tokensUsed / 1000) + 'k токенов · ' : ''}${g.timeUsedSeconds ? Math.max(1, Math.round(g.timeUsedSeconds / 60)) + ' мин' : ''}\nНажми, чтобы изменить или снять (/goal clear)`;
+}
 const accountSelect = h('select', { 'aria-label': 'Аккаунт' });
 const provider = h('select', { 'aria-label': 'Провайдер' }, h('option', { value: 'codex' }, 'Codex'), h('option', { value: 'claude' }, 'Claude'));
 const suggestions = h('div.slash-suggestions', { hidden: true, role: 'listbox', 'aria-label': 'Команды' });
@@ -29,11 +38,12 @@ const sidebar = h('aside.sidebar'), sidebarScroll = h('div.sidebar-scroll');
 const toggleSidebar = () => { app.classList.toggle('sidebar-collapsed'); };
 const sectionTitle = text => h('div.section-title', {}, text);
 const trashButton = iconButton('trash','Открыть корзину',async()=>{showingTrash=!showingTrash;await loadHistory();header();},'Корзина');
-const quotaList = h('div.sidebar-quotas', {'aria-label':'Квоты аккаунтов'});
+// Лимиты — рядом колец внизу окна, как док: щелчок — перейти на аккаунт, правый щелчок — действия с ним.
+const ringBar = h('div.ring-bar', {'aria-label':'Лимиты аккаунтов'});
 const settingsButton = iconButton('settings','⚙ Настройки',()=>ui.openSettings());
 sidebarScroll.append(sectionTitle('Открытые чаты'),tabs,button('+ Новый диалог',()=>open(),'new-chat'),
   h('div.history-search',{},icon('search'),search),h('div.history-tools',{},trashButton,iconButton('limits','◫ Лимиты',()=>call('limits','toggle'))),threadList);
-sidebar.append(h('div.sidebar-tools',{},h('span.app-name',{},'Пульт'),iconButton('search','Открыть поиск',()=>search.focus()),iconButton('new','Новый чат',()=>open()),iconButton('sidebar','Скрыть боковую панель',toggleSidebar)),sidebarScroll,quotaList,nav,
+sidebar.append(h('div.sidebar-tools',{},h('span.app-name',{},'Пульт'),iconButton('search','Открыть поиск',()=>search.focus()),iconButton('new','Новый чат',()=>open()),iconButton('sidebar','Скрыть боковую панель',toggleSidebar)),sidebarScroll,nav,
   h('div.sidebar-footer',{},iconButton('cpu','↗ API-подключения',()=>ui.openPanel('api')),h('small.app-version',{},'Пульт'),settingsButton));
 const controls = h('div.compose-actions',{},provider,modelChoices,iconButton('paperclip','+ Файлы',attach),extensions,
   iconButton('people','Мультиагент',()=>{active.multi=!active.multi;header();}),
@@ -42,10 +52,10 @@ const controls = h('div.compose-actions',{},provider,modelChoices,iconButton('pa
 const usageLabel = h('small.usage');
 const activity = h('div.activity',{hidden:true});
 app.append(sidebar,h('main.workspace',{},
-  h('header.toolbar',{},iconButton('sidebar','Показать боковую панель',toggleSidebar),h('div.heading',{},title,status),
-    h('div.toolbar-actions',{},iconButton('people','Общий проект',()=>ui.openPanel('team','right')),accountSelect,iconButton('settings','Настройки',()=>ui.openSettings()))),stage,
+  h('header.toolbar',{},iconButton('sidebar','Показать боковую панель',toggleSidebar),h('div.heading',{},title,status,goalChip),
+    h('div.toolbar-actions',{},iconButton('people','Вместе',()=>ui.openPanel('team','right')),accountSelect,iconButton('settings','Настройки',()=>ui.openSettings()))),stage,
   h('div.compose-wrap',{},activity,queue,suggestions,h('div.composer',{},files,h('div.composer-input',{},h('span.prompt-mark',{},'>'),composer),controls),
-    h('div.composer-footer',{},folder,usageLabel,h('small.hint',{},'Enter — отправить · Shift+Enter — новая строка'))),statusbar),panel,toast);
+    h('div.composer-footer',{},folder,usageLabel,h('small.hint',{},'Enter — отправить · Shift+Enter — новая строка'))),ringBar,statusbar),panel,toast);
 ui.toast = text => { toast.textContent = text; toast.hidden = false; clearTimeout(ui.toast.timer); ui.toast.timer = setTimeout(() => toast.hidden = true, 5000); };
 window.addEventListener('pult-error', e => ui.toast(e.detail));
 window.addEventListener('unhandledrejection', e => { e.preventDefault(); ui.toast(String(e.reason)); });
@@ -109,11 +119,12 @@ function refreshExtensions() {
 ui.onChange(refreshExtensions);
 function resizeComposer() { composer.style.height='auto';composer.style.height=Math.min(220,Math.max(34,composer.scrollHeight))+'px'; }
 function header() {
+  paintGoal();
   title.textContent = active.title; status.textContent = active.busy ? '● Работает' : '● Готов'; status.classList.toggle('working', active.busy);
   folder.replaceChildren(icon('folder'),document.createTextNode(active.cwd.replace(info?.home || '\0','~') || 'Папка проекта')); folder.title = active.cwd;
   provider.value = active.target; accountSelect.hidden = active.target !== 'codex'; accountSelect.value = active.account; accountSelect.disabled = active.busy; modelChoices.disabled = active.busy || active.target.startsWith('api:'); modelChoices.replaceChildren(icon('cpu'),document.createTextNode((active.model || 'По умолчанию')+(active.effort?' · '+active.effort:'')+(active.fast?' ⚡':''))); stopButton.hidden = !active.busy;
   resizeComposer();
-  quotaList.querySelectorAll('button').forEach(b=>{b.disabled=active.busy || active.target!=='codex';b.classList.toggle('current',b.dataset.home===active.account);});
+  ringBar.querySelectorAll('.ring-tile[data-home]').forEach(b=>{b.disabled=active.busy || active.target!=='codex';b.classList.toggle('current',active.target==='codex'&&b.dataset.home===active.account);});
   provider.disabled=active.busy;
   for (const label of ['Мультиагент','Подтверждать за меня']) { const b=controls.querySelector(`[aria-label="${label}"]`); b.classList.toggle('active',label==='Мультиагент'?!!active.multi:!!active.autoApprove); b.disabled=active.target.startsWith('api:'); }
   activity.hidden=!active.busy;activity.textContent='✳ Работаю… · Esc — прервать';
@@ -249,16 +260,21 @@ async function connect(c) {
   c.gen++; await call('codex', 'connect', { chat: c.id, home: c.account, gen: c.gen }); c.connected = true;
 }
 const effectiveRules = c => c.rulesOverride ?? prefs.rules ?? '';
+// Агент знает, где он работает и где лежит код самого Пульта. Добавляется к правилам при запуске, в сравнении правил не участвует.
+const PULT_CONTEXT = 'Ты работаешь внутри «Пульта» — настольного приложения для Codex и Claude Code на Mac и Windows. Исходники Пульта: https://github.com/abobalover228-afk/pult-public (приложение — папка windows/, Rust + Tauri 2, интерфейс на JS в windows/ui/). Если просят поправить или объяснить сам Пульт, речь об этом репозитории. Пользователь читает ответы в окне Пульта: Markdown отображается, ссылки на файлы вида путь:строка открываются кликом.';
+const withPult = rules => rules ? `${PULT_CONTEXT}\n\n${rules}` : PULT_CONTEXT;
 async function thread(c, rules = effectiveRules(c)) {
   await connect(c); if (c.loaded) return;
   const params = { cwd: c.cwd, approvalPolicy: 'on-request', sandbox: c.sandbox || prefs.sandbox || 'workspace-write', ...(c.model && { model: c.model }) };
-  if (rules) params.developerInstructions = rules;
+  params.developerInstructions = withPult(rules);
   if (c.thread) {
     params.threadId = c.thread;
     const path = await call('codex', 'rollout', { thread: c.thread, home: c.account }); if (path) params.path = path;
   }
   const r = await rpc(c, c.thread ? 'thread/resume' : 'thread/start', params);
   c.thread = r.thread.id; c.loaded = true; c.appliedRules = rules;
+  // Цель живёт в Codex; после открытия диалога спрашиваем, есть ли она, чтобы показать значок.
+  rpc(c, 'thread/goal/get', { threadId: c.thread }).then(g => { c.goal = g?.goal || null; if (c === active) header(); }).catch(() => {});
   if (!c.messages.length) for (const t of r.thread.turns || []) for (const item of t.items || []) ingest(c, item, true);
 }
 async function send(text = composer.value, opts = {}) {
@@ -291,7 +307,7 @@ async function run(c, job, continuation = false) {
     }
     if (c.target === 'claude') {
       if (!c.claudeStarted) { c.gen++; c.claudeStarted = true; }
-      await call('claude', 'send', { chat: c.id, gen: c.gen, cwd: c.cwd, session: c.session, forkSession: !!c.forkSession, model: c.model, effort: c.effort, fast: !!c.fast, permissionMode: c.permissionMode || 'default', extraDirs: c.extraDirs || [], rules,
+      await call('claude', 'send', { chat: c.id, gen: c.gen, cwd: c.cwd, session: c.session, forkSession: !!c.forkSession, model: c.model, effort: c.effort, fast: !!c.fast, permissionMode: c.permissionMode || 'default', extraDirs: c.extraDirs || [], rules: withPult(rules),
         text: job.text + (job.attachments.length ? `\n\nПриложенные файлы (прочитай):\n${job.attachments.join('\n')}` : '') }); c.pendingSeed = null; c.appliedRules = rules; return;
     }
     await thread(c, rules);
@@ -369,6 +385,7 @@ await on('codex', async e => {
     } else await call('codex', 'respond', { chat: c.id, gen: e.gen, id: e.id, error: `Пока не поддерживается: ${e.method}` }); return;
   }
   if (p.threadId && c.thread && p.threadId !== c.thread) return;
+  if (e.method === 'thread/goal/updated' || e.method === 'thread/goal/cleared') { c.goal = e.method === 'thread/goal/updated' ? (p.goal || null) : null; if (c === active) header(); return; }
   if (e.method === 'turn/started') { c.turn = p.turn.id; c.busy = true; if (c === active) header(); }
   else if (e.method === 'turn/plan/updated') add(c, 'plan', (p.explanation ? p.explanation + '\n\n' : '') + (p.plan || []).map(step => `${step.status === 'completed' ? '✓' : step.status === 'inProgress' ? '→' : '○'} ${step.step}`).join('\n'), `plan:${c.turn || c.epoch}`);
   else if (e.method === 'thread/tokenUsage/updated') c.usage = p.tokenUsage;
@@ -532,6 +549,9 @@ async function inlineCLI(c, request, label, ask) {
 ui.chats.shell = (command, { chat = active, confirm: ask = true } = {}) => inlineCLI(chat, { cmd: command }, command, ask);
 ui.chats.exec = (program, args = [], { chat = active, confirm: ask = false } = {}) => inlineCLI(chat, { program, arguments: args }, [program, ...args].join(' '), ask);
 ui.chats.rpc = async (c, method, params = {}) => { await connect(c); return rpc(c, method, params); };
+/** Поднять диалог в Codex (начать или возобновить), чтобы команды вроде /goal работали после перезапуска и смены аккаунта. */
+ui.chats.ensureThread = async c => { await thread(c); return c.thread; };
+ui.chats.setGoal = (c, goal) => { c.goal = goal || null; if (c === active) header(); };
 ui.chats.save = saveConversation;
 ui.chats.restart = async c => {
   if (c.busy) throw new Error('Сначала заверши текущий ход');
@@ -639,14 +659,25 @@ Object.assign(ui.chats, { draft: () => composer.value, setDraft: text => { compo
 async function renderQuotas() {
   try {
     const state=await call('limits','state');
-    quotaList.replaceChildren(...(state?.codex?.accounts || []).map(account=>{
-      const rows=(account.limits || []).flatMap(bucket=>bucket.windows || []).slice(0,2);
-      const b=button('',()=>ui.chats.switchAccount(active,account.home || accounts.find(a=>a.name===account.name)?.home));
-      b.className='account-quota';b.dataset.home=account.home || accounts.find(a=>a.name===account.name)?.home || '';b.disabled=active?.busy || active?.target!=='codex';b.classList.toggle('current',b.dataset.home===active?.account);b.title=`Перейти на ${account.name}`;
-      b.append(h('span',{},account.name),h('div.quota-mini',{},...rows.map(w=>{const value=w.remaining_percent;return h('div',{},h('small',{},w.minutes<=300?'5ч':'Нед'),h('meter',{min:0,max:100,value:value ?? 0,'aria-label':`${account.name}: ${w.minutes<=300?'5 часов':'неделя'}`}),h('small',{},typeof value==='number'?`${Math.round(value)}%`:'—'));})));
+    // Аккаунт убрали или переименовали — список в меню чата обновляется вместе с кольцами.
+    const fresh=await call('app','accounts').catch(()=>null);
+    if(Array.isArray(fresh)&&JSON.stringify(fresh)!==JSON.stringify(accounts)){accounts=fresh;accountSelect.replaceChildren(...accounts.map(a=>h('option',{value:a.home},a.name)));accountSelect.value=active?.account;}
+    const pickWindow=(acc,long)=>((acc.limits||[]).find(l=>!l.name||l.name.toLowerCase()==='codex')||acc.limits?.[0])?.windows?.find(w=>long?w.minutes>=10000:w.minutes<10000);
+    const until=ts=>{if(!ts)return 'сброс неизвестен';const m=Math.round((ts*1000-Date.now())/60000);return m<=0?'уже сброшен':m<60?`через ${m} мин`:m<1440?`через ${Math.floor(m/60)} ч ${m%60} мин`:new Date(ts*1000).toLocaleString('ru',{weekday:'short',hour:'2-digit',minute:'2-digit'});};
+    const tile=(name,home,five,week,extra='')=>{
+      const v=[five?.remaining_percent,week?.remaining_percent],low=Math.min(...v.filter(Number.isFinite));
+      const b=h('button.ring-tile'+extra,{type:'button'},rings(v[0],v[1],Number.isFinite(low)?Math.round(low):'—'),h('span',{},name));
+      b.title=`${name}\n5 часов: ${Number.isFinite(v[0])?Math.round(v[0])+'%':'—'} · ${until(five?.resets_at)}\nНеделя: ${Number.isFinite(v[1])?Math.round(v[1])+'%':'—'} · ${until(week?.resets_at)}`+(home?'\nЩелчок — перейти на аккаунт, правый щелчок — действия':'');
+      if(home){b.dataset.home=home;b.onclick=()=>ui.chats.switchAccount(active,home).catch(e=>ui.toast(String(e)));b.oncontextmenu=e=>{e.preventDefault();call('limits','tileMenu',{home,name,window:'main'}).catch(ui.toast);};b.disabled=active?.busy||active?.target!=='codex';b.classList.toggle('current',active?.target==='codex'&&home===active?.account);}
       return b;
-    }));
-  } catch { /* Existing widget owns refresh errors. */ }
+    };
+    const rows=state?.codex?.accounts||[];
+    let claude;try{claude=typeof state?.claude==='string'?JSON.parse(state.claude):state?.claude;}catch{}
+    const cl=k=>{const r=claude?.rate_limits?.[k];return r&&{remaining_percent:typeof r.used_percentage==='number'?100-r.used_percentage:NaN,resets_at:r.resets_at};};
+    ringBar.replaceChildren(...rows.map(acc=>tile(acc.name,acc.home||accounts.find(a=>a.name===acc.name)?.home||'',pickWindow(acc,false),pickWindow(acc,true))),
+      ...(claude?.rate_limits?[tile('Claude','',cl('five_hour'),cl('seven_day'),'.claude')]:[]));
+    ringBar.hidden=!ringBar.childElementCount;
+  } catch { /* Ошибки обновления показывает сам виджет. */ }
 }
 await on('limits',renderQuotas);
 try {

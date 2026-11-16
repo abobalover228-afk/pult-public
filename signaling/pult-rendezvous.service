@@ -1,5 +1,5 @@
 [Unit]
-Description=Pult peer rendezvous (no chat relay)
+Description=Pult room server (rendezvous, optional encrypted relay)
 After=network.target caddy.service
 
 [Service]
@@ -7,7 +7,7 @@ Type=simple
 DynamicUser=yes
 User=pult-rendezvous
 ExecStart=/usr/bin/python3 /opt/pult-rendezvous/server.py
-ExecStartPost=/usr/bin/python3 /opt/pult-rendezvous/route.py
+ExecStartPost=-/usr/bin/python3 /opt/pult-rendezvous/route.py
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONDONTWRITEBYTECODE=1

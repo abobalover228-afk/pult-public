@@ -20,7 +20,8 @@
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; img-src 'self' data: blob: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-src 'self' blob: pult-mod: http://pult-mod.localhost https://pult-mod.localhost"
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": false,

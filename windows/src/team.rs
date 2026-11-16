@@ -49,6 +49,24 @@ pub async fn call(_app:&AppHandle,method:&str,a:Value)->Result<Value,String>{
  boards.insert(room.into(),next);return Ok(reply);
 }
  if method=="outbox"{let room=a["room"].as_str().filter(|s|(20..=80).contains(&s.len())&&s.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'||b==b'-')).ok_or("Неверная комната")?;let file=crate::util::data_dir().join("Rooms").join(format!("{room}.outbox.json"));if a["save"]==true{let rows=a["rows"].as_array().filter(|r|r.len()<=100).ok_or("Outbox переполнен")?;let bytes=serde_json::to_vec(rows).map_err(|_|"Ошибка outbox")?;if bytes.len()>1000000{return Err("Outbox больше 1 МБ".into());}crate::util::atomic_write(&file,&bytes)?;return Ok(json!({"ok":true}));}return match std::fs::read(file){Ok(bytes)=>serde_json::from_slice(&bytes).map_err(|_|"Повреждён outbox".into()),Err(e)if e.kind()==std::io::ErrorKind::NotFound=>Ok(json!([])),Err(_)=>Err("Outbox недоступен".into())};}
+ if method=="history"{
+ // Переписка комнаты на диске: переживает перезапуск, до 500 сообщений.
+ let room=a["room"].as_str().filter(|s|(20..=80).contains(&s.len())&&s.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'||b==b'-')).ok_or("Неверная комната")?;let file=crate::util::data_dir().join("Rooms").join(format!("{room}.chat.json"));
+ if a["save"]==true{let rows=a["rows"].as_array().filter(|r|r.len()<=500).ok_or("Слишком длинная история")?;let bytes=serde_json::to_vec(rows).map_err(|_|"Ошибка истории")?;if bytes.len()>4_000_000{return Err("История больше 4 МБ".into());}crate::util::atomic_write(&file,&bytes)?;return Ok(json!({"ok":true}));}
+ return match std::fs::read(file){Ok(bytes)=>Ok(serde_json::from_slice(&bytes).unwrap_or(json!([]))),Err(_)=>Ok(json!([]))};}
+ if method=="token"{
+ // Токен создания комнат: только записать или узнать, задан ли он. Сам токен в интерфейс не возвращается.
+ let file=crate::util::data_dir().join("team/.env");let env=std::fs::read_to_string(&file).unwrap_or_default();
+ if let Some(value)=a["value"].as_str(){let value=value.trim();if value.len()>200||!value.bytes().all(|b|b.is_ascii_graphic()){return Err("Неверный токен".into());}let text=format!("{}\nPULT_ROOM_CREATE_TOKEN={}\n",env.lines().filter(|l|!l.starts_with("PULT_ROOM_CREATE_TOKEN=")).collect::<Vec<_>>().join("\n"),value);crate::util::atomic_write(&file,text.as_bytes())?;return Ok(json!({"set":!value.is_empty()}));}
+ return Ok(json!({"set":env.lines().any(|l|l.strip_prefix("PULT_ROOM_CREATE_TOKEN=").is_some_and(|v|!v.trim_matches('"').is_empty()))}));}
+ if method=="health"{
+ let server=a["server"].as_str().ok_or("Нет адреса")?;let mut url=reqwest::Url::parse(server.trim()).map_err(|_|"Нужен адрес вида https://твой.домен/pult-link")?;
+ if !(url.scheme()=="https"||(url.scheme()=="http"&&matches!(url.host_str(),Some("localhost"|"127.0.0.1"|"[::1]"))))||!url.username().is_empty()||url.password().is_some()||url.query().is_some()||url.fragment().is_some(){return Err("Нужен HTTPS-адрес без логина и параметров".into());}
+ url.set_path(&format!("{}/health",url.path().trim_end_matches('/')));
+ let client=crate::util::http_builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(10)).build().map_err(|_|"Ошибка HTTP")?;
+ let response=client.get(url).send().await.map_err(|_|"Сервер не отвечает")?;let code=response.status().as_u16();
+ let value:Value=response.json().await.unwrap_or(Value::Null);if code!=200||value["ok"]!=true{return Err(format!("Это не сервер комнат Пульта (ответ {code})"));}
+ return Ok(json!({"relay":value["mode"]=="relay","create":value["create"].as_str().unwrap_or("token")}));}
  if method=="saved"{let file=crate::util::data_dir().join("team/.env");let env=std::fs::read_to_string(file).unwrap_or_default();let code=env.lines().find_map(|l|l.strip_prefix("PULT_TEAM_INVITATION=")).and_then(|s|serde_json::from_str::<String>(s).ok());let identity=env.lines().find_map(|l|l.strip_prefix("PULT_TEAM_IDENTITY=")).and_then(|s|serde_json::from_str::<String>(s).ok());return Ok(json!({"code":code,"identity":identity}));}
  if method=="saveInvitation"{let code=a["code"].as_str().filter(|s|s.len()<4000).ok_or("Неверное приглашение")?;let file=crate::util::data_dir().join("team/.env");let env=std::fs::read_to_string(&file).unwrap_or_default();let text=format!("{}\nPULT_TEAM_INVITATION={}\n",env.lines().filter(|l|!l.starts_with("PULT_TEAM_INVITATION=")).collect::<Vec<_>>().join("\n"),serde_json::to_string(code).unwrap());crate::util::atomic_write(&file,text.as_bytes())?;return Ok(json!({"ok":true}));}
  if method=="create"{
@@ -92,7 +110,7 @@ pub async fn call(_app:&AppHandle,method:&str,a:Value)->Result<Value,String>{
  let server=reqwest::Url::parse(a["server"].as_str().ok_or("Нет сервера")?).map_err(|_|"Неверный сервер")?;
  if !(server.scheme()=="https"||(server.scheme()=="http"&&matches!(server.host_str(),Some("127.0.0.1"|"localhost"|"[::1]"))))||!server.username().is_empty()||server.password().is_some()||server.query().is_some()||server.fragment().is_some(){return Err("Неверный сервер".into());}
  let room=a["room"].as_str().unwrap_or_default();let action=a["action"].as_str().unwrap_or_default();
- if !(20..=80).contains(&room.len())||!room.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'||b==b'-')||!["join","events","signal","leave"].contains(&action){return Err("Неверный маршрут комнаты".into());}
+ if !(20..=80).contains(&room.len())||!room.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'||b==b'-')||!["join","events","signal","leave","relay"].contains(&action){return Err("Неверный маршрут комнаты".into());}
  let mut url=server;url.set_path(&format!("{}/v1/rooms/{room}/{action}",url.path().trim_end_matches('/')));if action=="events"{url.query_pairs_mut().append_pair("after",&a["cursor"].as_u64().unwrap_or(0).to_string());}
  let client=crate::util::http_builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(35)).build().map_err(|_|"Ошибка HTTP")?;
  let mut r=if action=="events"{client.get(url)}else{client.post(url).json(&a["body"])};

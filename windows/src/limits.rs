@@ -222,9 +222,9 @@ fn shown(app: &AppHandle) -> bool {
     widget(app).and_then(|w| w.is_visible().ok()).unwrap_or(false)
 }
 
-/// Сохранённая позиция, если она на включённом экране; иначе — правый верхний угол основного.
+/// Сохранённая позиция, если она на включённом экране; иначе — внизу по центру основного экрана, над Доком.
 fn place(w: &WebviewWindow) {
-    let saved = util::setting("limitsPos");
+    let saved = util::setting("dockPos");
     if let (Some(x), Some(y)) = (saved[0].as_i64(), saved[1].as_i64()) {
         let on_screen = w.available_monitors().unwrap_or_default().iter().any(|m| {
             let (p, s) = (m.position(), m.size());
@@ -235,9 +235,14 @@ fn place(w: &WebviewWindow) {
             return;
         }
     }
-    if let Ok(Some(m)) = w.primary_monitor() {
+    dock_default(w);
+}
+fn dock_default(w: &WebviewWindow) {
+    if let (Ok(Some(m)), Ok(size)) = (w.primary_monitor(), w.outer_size()) {
         let f = m.scale_factor();
-        let _ = w.set_position(tauri::PhysicalPosition::new(m.position().x + m.size().width as i32 - (270.0 * f) as i32, m.position().y + (40.0 * f) as i32));
+        let x = m.position().x + (m.size().width as i32 - size.width as i32) / 2;
+        let y = m.position().y + m.size().height as i32 - size.height as i32 - (96.0 * f) as i32;
+        let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
     }
 }
 
@@ -264,12 +269,23 @@ fn open(app: &AppHandle, label: &str, title: &str, size: (f64, f64), min: (f64, 
     Ok(())
 }
 
+/// Позицию запоминаем только после того, как виджет перетащили рукой.
+/// Действие для окна «Аккаунты» (войти, переименовать), пока оно открывается.
+static PENDING_UI: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+static DRAGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn init(app: &AppHandle) {
     let only = std::env::args().any(|a| a == "--limits");
     if let Ok(w) = WebviewWindowBuilder::new(app, "limits", WebviewUrl::App("limits.html".into()))
         .title("Лимиты")
-        .inner_size(250.0, 420.0)
+        .inner_size(420.0, 150.0)
         .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        // Настоящее размытие рабочего стола под доком, как у виджетов macOS; на Windows — акрил.
+        .effects(tauri::window::EffectsBuilder::new()
+            .effect(if cfg!(windows) { tauri::window::Effect::Acrylic } else { tauri::window::Effect::HudWindow })
+            .state(tauri::window::EffectState::Active).radius(26.0).build())
         .resizable(false)
         .always_on_top(true)
         .skip_taskbar(true)
@@ -278,8 +294,8 @@ pub fn init(app: &AppHandle) {
     {
         w.on_window_event(|e| {
             if let WindowEvent::Moved(p) = e {
-                if p.x > -30000 && util::setting("limitsPos") != json!([p.x, p.y]) {
-                    util::set_setting("limitsPos", json!([p.x, p.y]));
+                if p.x > -30000 && DRAGGED.load(SeqCst) && util::setting("dockPos") != json!([p.x, p.y]) {
+                    util::set_setting("dockPos", json!([p.x, p.y]));
                 }
             }
         });
@@ -323,6 +339,26 @@ pub fn init(app: &AppHandle) {
         let _ = tray.build(app);
     }
     app.on_menu_event(|app, e| {
+        if let Some(rest) = e.id().as_ref().strip_prefix("acct:") {
+            let mut parts = rest.split(':');
+            let (Some(action), Some(Ok(i))) = (parts.next().map(str::to_string), parts.next().map(str::parse::<usize>)) else { return };
+            let Some(account) = util::accounts().get(i).cloned() else { return };
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match action.as_str() {
+                    "remove" => drop(crate::accounts::call(&app, "remove", json!({ "home": account.home })).await),
+                    "up" | "down" => drop(crate::accounts::call(&app, "move", json!({ "home": account.home, "step": if action == "up" { -1 } else { 1 } })).await),
+                    _ => {
+                        // Вход и переименование — в окне «Аккаунты»: там видно ссылку, код и поле имени.
+                        *PENDING_UI.lock().unwrap() = Some(json!({ "action": action, "home": account.home }));
+                        let _ = open(&app, "accounts", "Аккаунты", (520.0, 640.0), (440.0, 480.0));
+                        let _ = app.emit("accounts-ui", ());
+                    }
+                }
+                let _ = app.emit("limits", ());
+            });
+            return;
+        }
         if let Some(method) = e.id().as_ref().strip_prefix("limits:") {
             let (app, method) = (app.clone(), method.to_string());
             tauri::async_runtime::spawn(async move {
@@ -344,7 +380,17 @@ pub async fn call(app: &AppHandle, method: &str, a: Value) -> Result<Value, Stri
     match method {
         "state" => {
             let claude = std::fs::read(util::home().join(".claude/limits-cache.json")).ok().map(|d| String::from_utf8_lossy(&d).to_string());
-            return Ok(json!({ "claude": claude, "codex": *CODEX.lock().unwrap(), "loading": LOADING.load(SeqCst), "names": util::accounts() }));
+            // Список аккаунтов берём свежий: убранный аккаунт исчезает сразу, переименованный — с новым именем, без ожидания обновления лимитов.
+            let names = util::accounts();
+            let mut codex = CODEX.lock().unwrap().clone();
+            if let Some(rows) = codex["accounts"].as_array() {
+                let kept: Vec<Value> = names.iter().map(|n| {
+                    let mut row = rows.iter().find(|r| r["home"] == n.home.as_str()).cloned().unwrap_or_else(|| json!({ "home": n.home, "available": false, "limits": [] }));
+                    row["name"] = json!(n.name); row
+                }).collect();
+                codex["accounts"] = json!(kept);
+            }
+            return Ok(json!({ "claude": claude, "codex": codex, "loading": LOADING.load(SeqCst), "names": names }));
         }
         "refresh" => refresh(app).await,
         "changed" => drop(app.emit("limits", ())),
@@ -361,8 +407,30 @@ pub async fn call(app: &AppHandle, method: &str, a: Value) -> Result<Value, Stri
             refresh(app).await;
         }
         "map" => open(app, "map", "Карта команд", (1120.0, 760.0), (880.0, 650.0))?,
-        "drag" => drop(widget(app).map(|w| w.start_dragging())),
-        "fit" => drop(widget(app).map(|w| w.set_size(tauri::LogicalSize::new(250.0, a["height"].as_f64().unwrap_or(420.0))))),
+        "tileMenu" => {
+            // Правый щелчок по кольцу аккаунта. Удаление — через подменю, чтобы не убрать случайно.
+            let i = util::accounts().iter().position(|x| x.home == util::expand(home)).ok_or("Аккаунт не найден")?;
+            let name = a["name"].as_str().unwrap_or("аккаунт");
+            let remove = tauri::menu::SubmenuBuilder::new(app, "Убрать из списка").text(format!("acct:remove:{i}"), format!("Да, убрать «{name}»")).text("limits:noop", "Нет, оставить").build().map_err(|e| e.to_string())?;
+            let mut menu = MenuBuilder::new(app).text(format!("acct:login:{i}"), if a["signedIn"] == false { "Войти…" } else { "Войти заново…" }).text(format!("acct:rename:{i}"), "Переименовать…");
+            if i > 0 { menu = menu.text(format!("acct:up:{i}"), "Сдвинуть левее"); }
+            if i + 1 < util::accounts().len() { menu = menu.text(format!("acct:down:{i}"), "Сдвинуть правее"); }
+            let menu = menu.item(&remove).separator().text("limits:accounts", "Все аккаунты…").text("limits:add", "Добавить аккаунт…").text("limits:refresh", "Обновить").text("limits:toggle", "Скрыть док").build().map_err(|e| e.to_string())?;
+            let target = a["window"].as_str().and_then(|l| app.get_webview_window(l)).or_else(|| widget(app));
+            if let Some(w) = target { w.popup_menu(&menu).map_err(|e| e.to_string())?; }
+        }
+        "noop" => {}
+        "add" => { *PENDING_UI.lock().unwrap() = Some(json!({ "action": "add" })); open(app, "accounts", "Аккаунты", (520.0, 640.0), (440.0, 480.0))?; let _ = app.emit("accounts-ui", ()); }
+        "takeUi" => return Ok(PENDING_UI.lock().unwrap().take().unwrap_or(Value::Null)),
+        "drag" => { DRAGGED.store(true, SeqCst); drop(widget(app).map(|w| w.start_dragging())) }
+        "dock" => { util::set_setting("dockPos", Value::Null); if let Some(w) = widget(app) { dock_default(&w); } }
+        "fit" => {
+            // Док растёт с числом аккаунтов; пока его не двигали, остаётся по центру снизу.
+            if let Some(w) = widget(app) {
+                let _ = w.set_size(tauri::LogicalSize::new(a["width"].as_f64().unwrap_or(420.0).clamp(160.0, 1400.0), a["height"].as_f64().unwrap_or(150.0).clamp(80.0, 900.0)));
+                if util::setting("dockPos").is_null() { dock_default(&w); }
+            }
+        }
         "menu" => {
             let menu = MenuBuilder::new(app).text("limits:refresh", "Обновить").text("limits:toggle", "Скрыть виджет").text("limits:quit", "Выход").build().map_err(|e| e.to_string())?;
             if let Some(w) = widget(app) {
@@ -371,7 +439,6 @@ pub async fn call(app: &AppHandle, method: &str, a: Value) -> Result<Value, Stri
         }
         "open" => open_codex(home, false),
         "login" => open_codex(home, true),
-        "add" => add_account()?,
         "usage" => terminal("claude /usage", None),
         "auto" => {
             let exe = std::env::current_exe().map_err(|e| e.to_string())?;

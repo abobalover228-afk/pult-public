@@ -70,7 +70,7 @@
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Пульт распознаёт речь, чтобы ты мог диктовать задачи.</string>
 	<key>PultRendezvousURL</key>
-	<string>https://186.243.168.184/pult-link</string>
+	<string></string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>

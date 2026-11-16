@@ -55,10 +55,18 @@ command('queue', 'Очередь: pause/resume/clear', async (arg, c) => {
   else if (arg === 'clear') c.queue = [];
   note(c, `Очередь: ${c.queue.length}, ${c.queuePaused ? 'пауза' : 'готова'}\n${c.queue.map((j, i) => `${i + 1}. ${j.text}`).join('\n')}`);
 });
-command('goal', 'Цель Codex', (objective, c) => {
-  if (!c.thread) throw new Error('Сначала начни диалог');
-  const clear = ['clear', 'off', 'stop'].includes(objective.trim());
-  return codex(c, clear ? 'thread/goal/clear' : objective ? 'thread/goal/set' : 'thread/goal/get', { threadId: c.thread, ...(objective && !clear && { objective, origin: 'user' }) });
+command('goal', 'Цель диалога: /goal текст, /goal — показать, /goal clear — снять', async (raw, c) => {
+  if (c.target !== 'codex') throw new Error('Цели есть только у Codex');
+  const objective = (raw || '').trim(), clear = ['clear', 'off', 'stop', 'снять'].includes(objective.toLowerCase());
+  // Диалог мог не быть загружен в Codex (новый чат, перезапуск, другой аккаунт) — поднимаем его, иначе Codex его не найдёт.
+  const threadId = await ui.chats.ensureThread(c);
+  if (clear) { await ui.chats.rpc(c, 'thread/goal/clear', { threadId }); ui.chats.setGoal(c, null); return note(c, '🎯 Цель снята.'); }
+  const r = await ui.chats.rpc(c, objective ? 'thread/goal/set' : 'thread/goal/get', { threadId, ...(objective && { objective, origin: 'user' }) });
+  const g = r?.goal; ui.chats.setGoal(c, g);
+  if (!g) return note(c, '🎯 Цели нет. Задай её: /goal что должно получиться');
+  const status = { active: 'активна', paused: 'на паузе', completed: 'выполнена', budgetLimited: 'упёрлась в бюджет' }[g.status] || g.status || '';
+  const spent = [g.tokensUsed ? `${Math.round(g.tokensUsed / 1000)}k токенов` : '', g.timeUsedSeconds ? `${Math.max(1, Math.round(g.timeUsedSeconds / 60))} мин` : '', g.tokenBudget ? `бюджет ${Math.round(g.tokenBudget / 1000)}k` : ''].filter(Boolean).join(' · ');
+  note(c, `🎯 ${objective ? 'Цель задана' : 'Цель'}: ${g.objective}\n${status}${spent ? ' · ' + spent : ''}`);
 });
 command('experimental', 'Экспериментальные функции Codex', (arg, c) => {
   const words = arg.trim().split(/\s+/);

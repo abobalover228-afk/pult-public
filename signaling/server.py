@@ -1,4 +1,9 @@
-"""Rendezvous only. Chat messages and file contents have no endpoint here."""
+"""Rendezvous for Pult rooms.
+
+By default it only introduces peers (encrypted ICE/SDP). With PULT_SIGNAL_RELAY=1 it also
+forwards end-to-end encrypted room packets for peers whose networks block a direct connection.
+The room key never reaches the server, so relayed content is opaque here.
+"""
 import collections
 import hmac
 import json
@@ -24,6 +29,7 @@ class Room:
         self.changed = threading.Condition()
         self.touched = time.monotonic()
         self.budget = {}
+        self.relay_budget = {}
 
     def emit(self, kind, sender, recipient="", box=""):
         self.sequence += 1
@@ -39,12 +45,14 @@ class Room:
             if time.monotonic() - last > 90:
                 del self.peers[peer]
                 self.budget.pop(peer, None)
+                self.relay_budget.pop(peer, None)
                 self.emit("leave", peer)
 
 
 class Rendezvous:
-    def __init__(self, create_token=None):
+    def __init__(self, create_token=None, relay=False):
         self.create_token = create_token
+        self.relay = relay
         self.rooms = {}
         self.lock = threading.Lock()
         self.creates = {}
@@ -118,7 +126,8 @@ def make_handler(state):
                     self.end_headers(); self.close_connection = True; self.wfile.write(page)
                     return
                 if url.path == "/health" and method == "GET":
-                    return self.reply(200, {"ok": True, "mode": "signaling-only"})
+                    return self.reply(200, {"ok": True, "mode": "relay" if state.relay else "signaling-only",
+                                            "create": "token" if state.create_token else "open"})
                 if url.path == "/v1/rooms" and method == "POST":
                     if state.create_token and not hmac.compare_digest(state.create_token, self.headers.get("X-Pult-Create-Token", "")):
                         raise RequestError(403)
@@ -148,7 +157,7 @@ def make_handler(state):
                         if peer not in room.peers:
                             room.emit("join", peer)
                         room.peers[peer] = time.monotonic()
-                        result = dict(peers=peers, cursor=room.sequence)
+                        result = dict(peers=peers, cursor=room.sequence, relay=state.relay)
                     elif peer not in room.peers:
                         raise RequestError(410)
                     elif method == "POST" and action == "leave":
@@ -170,6 +179,24 @@ def make_handler(state):
                             raise RequestError(429)
                         room.budget[peer] = (started, count + 1)
                         room.emit("signal", peer, body["recipient"], box)
+                        result = {"ok": True}
+                    elif method == "POST" and action == "relay":
+                        # Opaque room packets for peers that cannot connect directly. Off unless the owner enables it.
+                        if not state.relay:
+                            raise RequestError(404)
+                        if set(body) != {"recipient", "box"} or body["recipient"] not in room.peers:
+                            raise RequestError(400)
+                        box = body["box"]
+                        if not isinstance(box, str) or not 1 <= len(box) <= 48_000 or re.fullmatch(r"[A-Za-z0-9+/=]+", box) is None:
+                            raise RequestError(400)
+                        now = time.monotonic()
+                        started, count = room.relay_budget.get(peer, (now, 0))
+                        if now - started >= 60:
+                            started, count = now, 0
+                        if count >= 1200:
+                            raise RequestError(429)
+                        room.relay_budget[peer] = (started, count + 1)
+                        room.emit("relay", peer, body["recipient"], box)
                         result = {"ok": True}
                     elif method == "GET" and action == "events":
                         after = int(parse_qs(url.query).get("after", ["0"])[0])
@@ -223,11 +250,12 @@ class BoundedServer(ThreadingHTTPServer):
             self.slots.release()
 
 
-def create_server(host="127.0.0.1", port=8787, create_token=None):
-    server = BoundedServer((host, port), make_handler(Rendezvous(create_token)))
+def create_server(host="127.0.0.1", port=8787, create_token=None, relay=False):
+    server = BoundedServer((host, port), make_handler(Rendezvous(create_token, relay)))
     server.daemon_threads = True
     return server
 
 
 if __name__ == "__main__":
-    create_server(os.environ.get("PULT_SIGNAL_HOST", "127.0.0.1"), int(os.environ.get("PULT_SIGNAL_PORT", "8787")), os.environ.get("PULT_SIGNAL_CREATE_TOKEN")).serve_forever()
+    create_server(os.environ.get("PULT_SIGNAL_HOST", "127.0.0.1"), int(os.environ.get("PULT_SIGNAL_PORT", "8787")), os.environ.get("PULT_SIGNAL_CREATE_TOKEN") or None,
+                  os.environ.get("PULT_SIGNAL_RELAY", "") == "1").serve_forever()
