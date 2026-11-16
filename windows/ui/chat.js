@@ -1,34 +1,51 @@
 import { call, on, ui, h, settings } from './core.js';
-import { markdown, basename, button, localFileTarget } from './render.js';
+import { markdown, basename, button, localFileTarget, icon, iconButton } from './render.js';
 const chats = [], events = new EventTarget(), previews = new Map();
 const isImage = path => /\.(png|jpe?g|gif|webp|bmp)$/i.test(path);
-let active, accounts = [], info, prefs = {}, history = [], query = '', follow = true;
+let active, accounts = [], info, prefs = {}, history = [], query = '', follow = true, showingTrash = false;
 const app = document.querySelector('#app'), threadList = h('div.thread-list'), tabs = h('div.tabs'), feed = h('div.feed');
 const title = h('strong', {}, 'Новый диалог'), status = h('span.status', {}, 'Готов');
 const accountSelect = h('select', { 'aria-label': 'Аккаунт' });
 const provider = h('select', { 'aria-label': 'Провайдер' }, h('option', { value: 'codex' }, 'Codex'), h('option', { value: 'claude' }, 'Claude'));
 const suggestions = h('div.slash-suggestions', { hidden: true, role: 'listbox', 'aria-label': 'Команды' });
 let suggestionIndex = 0;
-const modelChoices = button('Модели', () => ui.models.open(active));
-const model = h('input.model', { placeholder: 'Модель по умолчанию', 'aria-label': 'Модель' });
+const modelChoices = iconButton('cpu', 'Модели', () => ui.models.open(active), 'По умолчанию');
 const folder = button('Папка проекта', async () => {
-  if (active.busy) return ui.toast('Сначала останови текущий ход');
-  const paths = await call('codex', 'pick', { folder: true, dir: active.cwd });
-  if (paths[0]) { active.cwd = paths[0]; active.thread = null; active.loaded = false; header(); }
+  const c=active;if(c.busy)return ui.toast('Сначала останови текущий ход');
+  const paths=await call('codex','pick',{folder:true,dir:c.cwd});
+  if(!paths?.[0] || paths[0]===c.cwd)return;
+  if(c.messages.length || c.thread || c.session) open({target:c.target,cwd:paths[0],model:c.model,account:c.account});
+  else {c.cwd=paths[0];if(c===active)header();}
 });
 const composer = h('textarea', { placeholder: 'Напиши задачу…  Enter — отправить, Shift+Enter — новая строка', rows: 3, 'aria-label': 'Сообщение' });
 const files = h('div.attachments'), queue = h('div.queue'), extensions = h('div.extensions');
 const leftDock = h('aside.dock.left', { hidden: true }), rightDock = h('aside.dock.right', { hidden: true }), mainDock = h('section.main-dock', { hidden: true }), statusbar = h('div.statusbar');
 const stage = h('div.stage', {}, leftDock, feed, mainDock, rightDock);
-const sendButton = button('Отправить ↑', () => send(), 'primary'), stopButton = button('Стоп', interrupt, 'danger');
+const sendButton = iconButton('arrow','Отправить ↑',()=>send()), stopButton = iconButton('stop','Стоп',interrupt);
+sendButton.className='send-button';stopButton.className='stop-button';
 const search = h('input.search', { placeholder: 'Найти диалог', 'aria-label': 'Поиск диалогов', oninput: e => { query = e.target.value.toLowerCase(); renderHistory(); } });
 const panel = h('dialog.panel'), toast = h('div.toast', { role: 'status', hidden: true }), nav = h('div.nav');
-app.append(h('aside.sidebar', {}, h('div.brand', {}, h('span.logo', {}, 'П'), h('div', {}, h('strong', {}, 'Пульт'), h('small', {}, 'Рабочее место для AI'))),
-  button('+ Новый диалог', () => open(), 'primary'), search, threadList, nav,
-  h('div.sidebar-footer', {}, button('◫ Лимиты', () => call('limits', 'toggle')), button('⚙ Настройки', () => ui.openSettings()))),
-  h('main.workspace', {}, h('header.toolbar', {}, h('div.heading', {}, title, status), folder, provider, accountSelect, model, modelChoices), tabs, stage,
-    h('div.compose-wrap', {}, queue, files, suggestions, h('div.composer', {}, composer, h('div.compose-actions', {}, button('+ Файлы', attach), extensions, stopButton, sendButton)),
-      h('small.hint', {}, 'Ctrl+N — новый диалог · Ctrl+K — поиск · во время работы сообщения попадают в очередь')), statusbar), panel, toast);
+const sidebar = h('aside.sidebar'), sidebarScroll = h('div.sidebar-scroll');
+const toggleSidebar = () => { app.classList.toggle('sidebar-collapsed'); };
+const sectionTitle = text => h('div.section-title', {}, text);
+const trashButton = iconButton('trash','Открыть корзину',async()=>{showingTrash=!showingTrash;await loadHistory();header();},'Корзина');
+const quotaList = h('div.sidebar-quotas', {'aria-label':'Квоты аккаунтов'});
+const settingsButton = iconButton('settings','⚙ Настройки',()=>ui.openSettings());
+sidebarScroll.append(sectionTitle('Открытые чаты'),tabs,button('+ Новый диалог',()=>open(),'new-chat'),
+  h('div.history-search',{},icon('search'),search),h('div.history-tools',{},trashButton,iconButton('limits','◫ Лимиты',()=>call('limits','toggle'))),threadList);
+sidebar.append(h('div.sidebar-tools',{},h('span.app-name',{},'Пульт'),iconButton('search','Открыть поиск',()=>search.focus()),iconButton('new','Новый чат',()=>open()),iconButton('sidebar','Скрыть боковую панель',toggleSidebar)),sidebarScroll,quotaList,nav,
+  h('div.sidebar-footer',{},iconButton('cpu','↗ API-подключения',()=>ui.openPanel('api')),h('small.app-version',{},'Пульт'),settingsButton));
+const controls = h('div.compose-actions',{},provider,modelChoices,iconButton('paperclip','+ Файлы',attach),extensions,
+  iconButton('people','Мультиагент',()=>{active.multi=!active.multi;header();}),
+  iconButton('shield','Подтверждать за меня',()=>ui.commands.get('approvals').run(active.autoApprove?'off':'on',active)),
+  iconButton('rules','Правила чата',()=>ui.chats.openRules(active)),h('span.compose-spacer'),stopButton,sendButton);
+const usageLabel = h('small.usage');
+const activity = h('div.activity',{hidden:true});
+app.append(sidebar,h('main.workspace',{},
+  h('header.toolbar',{},iconButton('sidebar','Показать боковую панель',toggleSidebar),h('div.heading',{},title,status),
+    h('div.toolbar-actions',{},iconButton('people','Общий проект',()=>ui.openPanel('team','right')),accountSelect,iconButton('settings','Настройки',()=>ui.openSettings()))),stage,
+  h('div.compose-wrap',{},activity,queue,suggestions,h('div.composer',{},files,h('div.composer-input',{},h('span.prompt-mark',{},'>'),composer),controls),
+    h('div.composer-footer',{},folder,usageLabel,h('small.hint',{},'Enter — отправить · Shift+Enter — новая строка'))),statusbar),panel,toast);
 ui.toast = text => { toast.textContent = text; toast.hidden = false; clearTimeout(ui.toast.timer); ui.toast.timer = setTimeout(() => toast.hidden = true, 5000); };
 window.addEventListener('pult-error', e => ui.toast(e.detail));
 window.addEventListener('unhandledrejection', e => { e.preventDefault(); ui.toast(String(e.reason)); });
@@ -84,21 +101,34 @@ ui.closePanel = id => { if (!id) { panel.close(); return; } const item = mounted
 function refreshExtensions() {
   provider.replaceChildren(...[{ id: 'codex', title: 'Codex' }, { id: 'claude', title: 'Claude' }, ...ui.providers].map(p => h('option', { value: p.id }, p.title)));
   if (active) provider.value = active.target;
-  nav.replaceChildren(...ui.sidebar.map(b => button(`${b.icon || ''} ${b.title}`, b.open)));
-  extensions.replaceChildren(...ui.composer.map(b => button(b.icon || b.title, () => b.run(active))));
+  nav.replaceChildren(...ui.sidebar.filter(b=>!['api','telegram','support'].includes(b.id)).map(b => iconButton(b.id==='team'?'people':b.id==='mods'?'cpu':'folder',`${b.icon || ''} ${b.title}`.trim(),b.open,b.title)));
+  settingsButton.title='Настройки · Telegram, голос, обновления и подключения';
+  extensions.replaceChildren(...ui.composer.map(b => iconButton(b.id==='voice'?'mic':b.id==='coach'?'wand':'cpu',b.icon || b.title,()=>b.run(active))));
   statusbar.replaceChildren(...ui.statusbar.map(b => button(b.icon || b.title, () => b.run(active))));
 }
 ui.onChange(refreshExtensions);
+function resizeComposer() { composer.style.height='auto';composer.style.height=Math.min(220,Math.max(34,composer.scrollHeight))+'px'; }
 function header() {
   title.textContent = active.title; status.textContent = active.busy ? '● Работает' : '● Готов'; status.classList.toggle('working', active.busy);
-  folder.textContent = basename(active.cwd) || 'Папка проекта'; folder.title = active.cwd;
-  provider.value = active.target; accountSelect.hidden = active.target !== 'codex'; accountSelect.value = active.account; accountSelect.disabled = active.busy; model.disabled = active.busy || active.target.startsWith('api:'); model.value = active.model || ''; modelChoices.disabled = active.busy || active.target.startsWith('api:'); modelChoices.textContent = active.fast ? 'Модели ⚡' : 'Модели'; stopButton.hidden = !active.busy;
+  folder.replaceChildren(icon('folder'),document.createTextNode(active.cwd.replace(info?.home || '\0','~') || 'Папка проекта')); folder.title = active.cwd;
+  provider.value = active.target; accountSelect.hidden = active.target !== 'codex'; accountSelect.value = active.account; accountSelect.disabled = active.busy; modelChoices.disabled = active.busy || active.target.startsWith('api:'); modelChoices.replaceChildren(icon('cpu'),document.createTextNode((active.model || 'По умолчанию')+(active.effort?' · '+active.effort:'')+(active.fast?' ⚡':''))); stopButton.hidden = !active.busy;
+  resizeComposer();
+  quotaList.querySelectorAll('button').forEach(b=>{b.disabled=active.busy || active.target!=='codex';b.classList.toggle('current',b.dataset.home===active.account);});
+  provider.disabled=active.busy;
+  for (const label of ['Мультиагент','Подтверждать за меня']) { const b=controls.querySelector(`[aria-label="${label}"]`); b.classList.toggle('active',label==='Мультиагент'?!!active.multi:!!active.autoApprove); b.disabled=active.target.startsWith('api:'); }
+  activity.hidden=!active.busy;activity.textContent='✳ Работаю… · Esc — прервать';
+  composer.placeholder=active.busy?'Напиши ещё — встанет в очередь…':`Задача для ${active.target==='claude'?'Claude':active.target==='codex'?'Codex':'API'}…`;
+  const usage=active.usage?.total || active.usage; usageLabel.textContent=usage ? `↑ ${usage.inputTokens ?? usage.input_tokens ?? '—'}  ↓ ${usage.outputTokens ?? usage.output_tokens ?? '—'}` : '';
+  trashButton.lastChild.textContent=showingTrash?'К истории':`Корзина (${(prefs.hidden || []).length})`;trashButton.classList.toggle('active',showingTrash);
   queue.replaceChildren(...(active.queue.length ? [h('div.queue-item', {}, h('small', {}, active.queuePaused ? 'Очередь на паузе' : 'Очередь сообщений'), button(active.queuePaused ? 'Продолжить очередь' : 'Пауза очереди', () => { if (active.queuePaused) return ui.chats.resumeQueue(active); active.queuePaused = true; header(); }))] : []), ...active.queue.map((q, i) => h('div.queue-item', {}, h('span', {}, `В очереди: ${q.text || '(вложение)'}`), button('×', () => { active.queue.splice(i, 1); header(); }))));
   files.replaceChildren(...active.attachments.map((path, i) => { const item = button(`${basename(path)} ×`, () => { active.attachments.splice(i, 1); header(); }); if (isImage(path)) item.prepend(thumbnail(path)); return item; }));
-  tabs.replaceChildren(...chats.map(c => {
-    const close = button('×', () => ui.chats.close(c)); close.setAttribute('aria-label', `Закрыть чат: ${c.title}`);
-    return h('div.tab', {}, button(`${c.busy ? '● ' : ''}${c.title.slice(0, 32)}`, () => select(c), c === active ? 'selected' : ''), close);
+  tabs.replaceChildren(...chats.map((c,i) => {
+    const close=iconButton('close',`Закрыть чат: ${c.title}`,()=>ui.chats.close(c));close.className='tab-close';
+    const selectButton=button('',()=>select(c));selectButton.className='tab-select';selectButton.setAttribute('aria-label',c.title);
+    selectButton.append(h('span.chat-dot',{className:c.busy?'chat-dot working':'chat-dot'}),h('span.chat-info',{},h('strong',{},c.title),h('small',{},`${c.busy?'Работает · ':''}${c.target==='codex'?(accounts.find(a=>a.home===c.account)?.name || 'Codex'):c.target==='claude'?'Claude':'API'} · ${basename(c.cwd)}`)),h('small.chat-shortcut',{},`Ctrl+${i+1}`));
+    return h('div.tab',{className:`tab${c===active?' selected':''}`},selectButton,close);
   }));
+
 }
 function select(c) {
   if (active) active.draft = composer.value;
@@ -127,7 +157,7 @@ function renderMessage(m) {
   if (m.kind === 'agent') markdown(body, m.text);
   else if (['command', 'thinking', 'file'].includes(m.kind)) body.append(h('details', { open: !!active.raw || !m.done }, h('summary', {}, m.text || label), h('pre', {}, m.output || '')));
   else body.textContent = m.text;
-  el.replaceChildren(h('div.message-label', {}, label), body);
+  el.replaceChildren(h('div.message-label', {title:label,'aria-label':label},m.kind==='user'?'>':m.kind==='agent'?'●':label), body);
   if (['user','agent'].includes(m.kind)) {
     const actions = h('div.message-actions', {}, button('Скопировать', () => navigator.clipboard.writeText(m.text)));
     if (m.kind === 'user') actions.append(button('Изменить и продолжить', () => showEdit(active, m)));
@@ -163,7 +193,7 @@ function showEdit(c, message) {
 }
 function renderFeed() {
   feed.replaceChildren();
-  if (!active.messages.length) feed.append(h('div.empty', {}, h('div.empty-mark', {}, 'П'), h('h1', {}, 'С чего начнём?'), h('p', {}, 'Выбери папку проекта и напиши задачу. История, инструменты и разрешения — в одном месте.')));
+  if (!active.messages.length) feed.append(h('div.empty', {}, h('h1', {}, 'С чего начнём?'),h('p',{},'Выбери папку проекта и напиши задачу.'),h('div.empty-hints',{},...[['Ctrl+N','Новый чат'],['Ctrl+K','Поиск по истории'],['/','Команды · !команда — терминал проекта'],['Esc','Остановить ответ']].map(([key,text])=>h('div',{},h('kbd',{},key),h('span',{},text))))));
   for (const m of active.messages) renderMessage(m);
 }
 feed.onscroll = () => follow = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 100;
@@ -240,6 +270,7 @@ async function send(text = composer.value, opts = {}) {
   const job = { text, origin: opts.origin ?? null, attachments: [...(opts.attachments || (opts.chat ? [] : c.attachments))] };
   if (!opts.chat) c.attachments = [];
   if (c === active && !opts.chat) { composer.value = ''; c.draft = ''; renderSuggestions(); }
+  if(c.multi && !opts.literal && !c.target.startsWith('api:')) { c.multi=false; await ui.commands.get('multi').run(text,c,job.attachments); return; }
   if (c.busy) { c.queue.push(job); header(); return; } await run(c, job);
 }
 async function run(c, job, continuation = false) {
@@ -392,14 +423,16 @@ await on('claude', async e => {
     await finish(c, { status: o.is_error ? 'failed' : 'completed', ...(o.is_error && { error: { message: 'Ошибка Claude' } }) });
   }
 });
-async function loadHistory() { history = await call('codex', 'threads', { hidden: prefs.hidden || [], pins: prefs.pins || [] }); history.sort((a,b) => Number((prefs.pins || []).includes(b.id)) - Number((prefs.pins || []).includes(a.id)) || b.date - a.date); renderHistory(); }
-async function historyPreference(key, value) { prefs[key] = value; await settings.set(key, value); await loadHistory(); }
+async function loadHistory() { history = await call('codex', 'threads', { hidden: showingTrash?[]:prefs.hidden || [], pins: prefs.pins || [] }); history.sort((a,b) => Number((prefs.pins || []).includes(b.id)) - Number((prefs.pins || []).includes(a.id)) || b.date - a.date); renderHistory(); }
+async function historyPreference(key, value) { prefs[key] = value; await settings.set(key, value); await loadHistory();if(active)header(); }
 ui.chats.pin = async id => historyPreference('pins', (prefs.pins || []).includes(id) ? prefs.pins.filter(x => x !== id) : [...(prefs.pins || []), id]);
 ui.chats.trash = async id => { if (!id) throw new Error('Диалог не сохранён'); await historyPreference('hidden', [...new Set([...(prefs.hidden || []), id])]); };
 ui.chats.restoreTrash = async id => historyPreference('hidden', id ? (prefs.hidden || []).filter(value => value !== id) : []);
 function renderHistory() {
-  threadList.replaceChildren(...history.filter(t => `${t.title} ${t.cwd}`.toLowerCase().includes(query)).map(t => {
+  let group;
+  threadList.replaceChildren(...history.filter(t => (showingTrash?(prefs.hidden || []).includes(t.id):!(prefs.hidden || []).includes(t.id)) && `${t.title} ${t.cwd} ${t.account}`.toLowerCase().includes(query)).map(t => {
     const b = button(t.title || 'Без названия', async () => {
+      if(showingTrash){await ui.chats.restoreTrash(t.id);return;}
       let c = chats.find(c => c.thread === t.id || (c.localId && t.id === `local:${c.localId}`) || (t.session && c.target === 'claude' && c.session === t.session));
       if (!c) {
         if (t.id.startsWith('claude:')) {
@@ -414,16 +447,21 @@ function renderHistory() {
         c = open({ thread: t.id, cwd: t.cwd || info.home, title: t.title, account: accounts.find(a => a.name === t.account)?.home || accounts[0]?.home });
         try { await thread(c); renderFeed(); } catch (e) { add(c, 'error', String(e)); }
       } else select(c);
-    }, 'thread'); b.title = `${t.account}\n${t.cwd}`;
-    return h('div', {}, b, button((prefs.pins || []).includes(t.id) ? '★' : '☆', () => ui.chats.pin(t.id)), button('В корзину', () => ui.chats.trash(t.id)));
-  }));
+    }, 'thread'); b.setAttribute('aria-label',t.title || 'Без названия'); b.title = `${t.account}\n${t.cwd}`;
+    const metadata=h('small.history-meta',{'aria-hidden':'true'});metadata.dataset.text=`${t.account || ''} · ${basename(t.cwd || '')}`;b.append(metadata);
+    const pin=button((prefs.pins || []).includes(t.id)?'★':'☆',()=>ui.chats.pin(t.id));pin.title='Закрепить диалог';
+    const trash=showingTrash?button('Восстановить',()=>ui.chats.restoreTrash(t.id)):iconButton('trash','В корзину',()=>ui.chats.trash(t.id));
+    const date=new Date(t.date*1000),today=new Date(),yesterday=new Date(Date.now()-86400000);
+    const name=showingTrash?'Корзина':query?'Результаты поиска':(prefs.pins || []).includes(t.id)?'Закреплённые':date.toDateString()===today.toDateString()?'Сегодня':date.toDateString()===yesterday.toDateString()?'Вчера':Date.now()-date.getTime()<7*86400000?'На этой неделе':'Раньше';
+    const row=h('div.history-row',{},b,h('div.history-row-actions',{},pin,trash));
+    if(name===group)return row;group=name;return [sectionTitle(name),row];
+  }).flat());
 }
 accountSelect.onchange = () => ui.chats.switchAccount(active, accountSelect.value).catch(e => { header(); ui.toast(String(e)); });
 provider.onchange = () => {
   if (active.busy) { provider.value = active.target; ui.toast('Сначала останови текущий ход'); return; }
   open({ target: provider.value, cwd: active.cwd, model: ui.providers.find(p => p.id === provider.value)?.model || '' });
 };
-model.onchange = () => ui.chats.configure(active, { model: model.value.trim() }).catch(e => { header(); ui.toast(String(e)); });
 function renderSuggestions() {
   const prefix = /^\/(\S*)$/.exec(composer.value);
   const matches = prefix ? [...ui.commands.values()].filter(c => c.name.startsWith(prefix[1].toLowerCase())).sort((a,b) => a.name.localeCompare(b.name)) : [];
@@ -436,7 +474,7 @@ function renderSuggestions() {
   }));
   suggestions.children[suggestionIndex]?.scrollIntoView({ block: 'nearest' });
 }
-composer.oninput = () => { active.draft = composer.value; suggestionIndex = 0; renderSuggestions(); };
+composer.oninput = () => { resizeComposer(); active.draft = composer.value; suggestionIndex = 0; renderSuggestions(); };
 composer.onkeydown = e => {
   if (e.isComposing) return;
   if (!suggestions.hidden && ['ArrowUp', 'ArrowDown', 'Tab', 'Escape'].includes(e.key)) {
@@ -449,14 +487,16 @@ composer.onkeydown = e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send().catch(ui.toast); }
 };
 document.onkeydown = e => {
+  if(e.key==='Escape' && active?.busy && !panel.open){e.preventDefault();interrupt().catch(ui.toast);return;}
   if (!(e.ctrlKey || e.metaKey)) return;
   if (e.key === 'n') { e.preventDefault(); open(); }
-  if (e.key === 'k') { e.preventDefault(); search.focus(); }
+  if (e.key === 'k') { e.preventDefault(); app.classList.remove('sidebar-collapsed');search.focus(); }
+  if (e.key === '\\') { e.preventDefault(); toggleSidebar(); }
   if (e.key === 'w' && !e.shiftKey) { e.preventDefault(); ui.chats.close(active).catch(ui.toast); }
   if (/^[1-9]$/.test(e.key) && chats[Number(e.key) - 1]) { e.preventDefault(); select(chats[Number(e.key) - 1]); }
 };
 const themes = new Map([
-  ['dark', { id: 'dark', name: 'Графит', vars: { '--bg': '#101216', '--surface': '#181b21', '--raised': '#20242c', '--line': '#2b303a', '--text': '#eceef3', '--muted': '#969eaf', '--accent': '#b5f080' } }],
+  ['dark', { id: 'dark', name: 'Графит', vars: { '--bg': '#101012', '--surface': '#1c1c20', '--raised': '#242428', '--line': '#303034', '--text': '#dedee1', '--muted': '#8b8b92', '--accent': '#d88965' } }],
   ['light', { id: 'light', name: 'Светлая', vars: { '--bg': '#f7f8fb', '--surface': '#ffffff', '--raised': '#edf0f5', '--line': '#d8dce5', '--text': '#17202d', '--muted': '#5e6879', '--accent': '#a3dc70' } }],
 ]);
 ui.theme = {
@@ -472,7 +512,10 @@ ui.openSettings = () => {
   const sandbox = h('select', {}, ...['read-only', 'workspace-write', 'danger-full-access'].map(s => h('option', { value: s, selected: s === (prefs.sandbox || 'workspace-write') }, s)));
   const body = h('div.panel-body.settings', {}, h('label', {}, 'Тема', theme), h('label', {}, 'Правила', rules), h('label', {}, 'Доступ к файлам', sandbox), h('label.inline', {}, auto, 'Переключать аккаунт при исчерпании лимита'),
     button('Сохранить', async () => { for (const [k, v] of Object.entries({ rules: rules.value, sandbox: sandbox.value, autoSwitch: auto.checked })) { await settings.set(k, v); prefs[k] = v; } panel.close(); }, 'primary'));
-  for (const s of ui.settings) { const el = h('section', {}, h('h3', {}, s.title)); s.render(el); body.append(el); } modal('Настройки', body);
+  body.append(h('section',{},h('h3',{},'Подключения'),h('div.actions',{},...[["telegram","Telegram"],["api","API-подключения"],["support","Сервер / Бот"],["updater","Обновления"]].map(([id,label])=>button(label,()=>ui.openPanel(id))))));
+  for (const s of ui.settings) { const el = h('section', {id:`settings-${s.id}`},h('h3',{},s.title)); s.render(el); body.append(el); }
+  const links=h('nav.settings-nav',{},...['Общие','Подключения',...ui.settings.map(s=>s.title)].map((name,i)=>button(name,()=>{(i?body.querySelectorAll('section')[i-1]:body).scrollIntoView({block:'start'});})));
+  modal('Настройки',h('div.settings-layout',{},links,body));
 };
 async function inlineCLI(c, request, label, ask) {
   if (c.busy) throw new Error('Сначала останови текущий ход');
@@ -592,8 +635,22 @@ ui.chats.answer = async (chatId, messageId, value) => {
     await respond(m, value); m.done = true; if (c === active) renderMessage(m);
   }
 };
-Object.assign(ui.chats, { draft: () => composer.value, setDraft: text => { composer.value = text; active.draft = text; composer.focus(); }, current: () => active, list: () => chats, activate: id => { const c = chats.find(c => c.id === id); if (!c) throw new Error('Чат не найден'); select(c); return c; }, stop: interrupt, open, send, insert: text => { composer.value += text; composer.focus(); }, note: (text, c = active) => add(c, 'note', text), onEvent: fn => events.addEventListener('event', e => fn(e.detail)) });
+Object.assign(ui.chats, { draft: () => composer.value, setDraft: text => { composer.value = text; active.draft = text; resizeComposer(); composer.focus(); }, current: () => active, list: () => chats, activate: id => { const c = chats.find(c => c.id === id); if (!c) throw new Error('Чат не найден'); select(c); return c; }, stop: interrupt, open, send, insert: text => { composer.value += text; resizeComposer(); composer.focus(); }, note: (text, c = active) => add(c, 'note', text), onEvent: fn => events.addEventListener('event', e => fn(e.detail)) });
+async function renderQuotas() {
+  try {
+    const state=await call('limits','state');
+    quotaList.replaceChildren(...(state?.codex?.accounts || []).map(account=>{
+      const rows=(account.limits || []).flatMap(bucket=>bucket.windows || []).slice(0,2);
+      const b=button('',()=>ui.chats.switchAccount(active,account.home || accounts.find(a=>a.name===account.name)?.home));
+      b.className='account-quota';b.dataset.home=account.home || accounts.find(a=>a.name===account.name)?.home || '';b.disabled=active?.busy || active?.target!=='codex';b.classList.toggle('current',b.dataset.home===active?.account);b.title=`Перейти на ${account.name}`;
+      b.append(h('span',{},account.name),h('div.quota-mini',{},...rows.map(w=>{const value=w.remaining_percent;return h('div',{},h('small',{},w.minutes<=300?'5ч':'Нед'),h('meter',{min:0,max:100,value:value ?? 0,'aria-label':`${account.name}: ${w.minutes<=300?'5 часов':'неделя'}`}),h('small',{},typeof value==='number'?`${Math.round(value)}%`:'—'));})));
+      return b;
+    }));
+  } catch { /* Existing widget owns refresh errors. */ }
+}
+await on('limits',renderQuotas);
 try {
   [accounts, info, prefs] = await Promise.all([call('app', 'accounts'), call('app', 'info'), call('app', 'settings')]);
-  accountSelect.replaceChildren(...accounts.map(a => h('option', { value: a.home }, a.name))); if (themes.has(prefs.theme)) ui.theme.apply(prefs.theme); open(); await loadHistory(); refreshExtensions(); ui.markReady(); await call('app', 'ready', { label: 'main' });
+  sidebar.querySelector('.app-version').textContent=`Пульт · ${info.version}`;
+  accountSelect.replaceChildren(...accounts.map(a => h('option', { value: a.home }, a.name))); if (themes.has(prefs.theme)) ui.theme.apply(prefs.theme); open(); await loadHistory(); refreshExtensions(); ui.markReady(); renderQuotas(); await call('app', 'ready', { label: 'main' });
 } catch (e) { app.append(h('pre', {}, `Не удалось запустить Пульт: ${e}`)); }

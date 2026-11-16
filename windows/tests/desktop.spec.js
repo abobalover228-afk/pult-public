@@ -394,6 +394,7 @@ test('closing a tab saves history, stops its process and preserves other drafts'
       stopped: window.calls.some(r => r.module === 'codex' && r.method === 'stop' && r.args.chat === first.id),
       saved: window.calls.find(r => r.method === 'saveLocal').args.value.messages[0].text };
   })).toEqual({ active: true, draft: 'Unsent draft', closed: 1, stopped: true, saved: 'Keep this reply' });
+  await page.locator('.tab').hover();
   await page.getByRole('button', { name: 'Закрыть чат: Новый диалог', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'С чего начнём?' })).toBeVisible();
 });
@@ -555,4 +556,55 @@ test('clipboard images and native file drops attach locally without stealing ano
  await expect.poll(()=>page.evaluate(async()=>(await import('/core.js')).ui.chats.current().attachments)).toEqual(['C:/project/dropped.png']);
  await expect(page.getByLabel('Сообщение',{exact:true})).toHaveValue('Other tab draft');
  expect(await page.evaluate(()=>window.calls.filter(r=>r.args?.method==='turn/start'||r.method==='send').length)).toBe(0);
+});
+
+test('Mac layout keeps chats and quotas in sidebar and model controls beside the composer',async({page})=>{
+ await page.setViewportSize({width:1100,height:760});await desktop(page);
+ await expect(page.locator('.sidebar .tabs .tab')).toHaveCount(1);
+ await expect(page.locator('.sidebar-quotas .account-quota')).toHaveCount(1);
+ await expect(page.locator('.composer').getByLabel('Провайдер')).toBeVisible();
+ await expect(page.locator('.composer').getByRole('button',{name:'Модели',exact:true})).toBeVisible();
+ const main=page.locator('.workspace');
+ await page.getByRole('button',{name:'Скрыть боковую панель',exact:true}).click();
+ await expect(page.locator('.sidebar')).toBeHidden();
+ await page.getByRole('button',{name:'Показать боковую панель',exact:true}).click();
+ await expect(page.locator('.sidebar')).toBeVisible();
+ await page.getByLabel('Сообщение',{exact:true}).fill('Первая строка\nВторая строка\nТретья строка\nЧетвёртая строка');
+ expect(await page.getByLabel('Сообщение',{exact:true}).evaluate(el=>el.clientHeight)).toBeGreaterThan(55);
+ await page.evaluate(async()=>{
+  const {ui}=await import('/core.js');const c=ui.chats.current();c.title='Обновить интерфейс Пульта';c.model='gpt-6.1-sol';
+  c.messages=[{id:'u',kind:'user',text:'Сделай интерфейс как в Пульте на Mac.'},{id:'a',kind:'agent',text:'### Компактное рабочее место\n\nЧаты и история слева. Модель, вложения и разрешения — под полем ввода.\n\n- История и квоты всегда под рукой\n- Настройки открываются отдельной панелью\n\n```rust\nfn main() {\n    println!("Пульт");\n}\n```'}];ui.chats.refresh(c);
+ });
+ await page.screenshot({path:'test-results/mac-style-chat.png'});
+ await page.getByRole('button',{name:'⚙ Настройки',exact:true}).click();
+ await expect(page.locator('.settings-nav')).toBeVisible();
+ await expect(page.getByRole('button',{name:'Telegram',exact:true})).toBeVisible();
+ await page.screenshot({path:'test-results/mac-style-settings.png'});
+ for(const width of [720,900,1440]){
+  await page.setViewportSize({width,height:760});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ }
+});
+
+test('multiagent composer chip keeps image attachments in the requested provider turn',async({page})=>{
+ await desktop(page);
+ await page.getByRole('button',{name:'+ Файлы',exact:true}).click();
+ await page.getByRole('button',{name:'Мультиагент',exact:true}).click();
+ await expect(page.getByRole('button',{name:'Мультиагент',exact:true})).toHaveClass(/active/);
+ await page.getByLabel('Сообщение',{exact:true}).fill('Проверь проект');
+ await page.getByRole('button',{name:'Отправить ↑',exact:true}).click();
+ await expect.poll(()=>page.evaluate(()=>window.calls.find(r=>r.args?.method==='turn/start')?.args.params.input)).toEqual(expect.arrayContaining([expect.objectContaining({type:'localImage',path:'C:\\project\\test.png'})]));
+});
+
+test('sidebar trash opens recoverable history without restoring everything',async({page})=>{
+ await desktop(page);
+ await page.locator('.history-row').hover();
+ await page.getByRole('button',{name:'В корзину',exact:true}).click();
+ await expect(page.locator('button.thread')).toHaveCount(0);
+ await page.getByRole('button',{name:'Открыть корзину',exact:true}).click();
+ await expect(page.locator('button.thread')).toHaveCount(1);
+ expect(await page.evaluate(()=>window.calls.filter(r=>r.method==='set'&&r.args.key==='hidden').at(-1).args.value)).toEqual(['existing']);
+ await page.getByRole('button',{name:'Починить сборку',exact:true}).click();
+ await expect(page.locator('button.thread')).toHaveCount(0);
+ expect(await page.evaluate(()=>window.calls.filter(r=>r.method==='set'&&r.args.key==='hidden').at(-1).args.value)).toEqual([]);
 });
