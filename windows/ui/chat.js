@@ -526,8 +526,9 @@ ui.openSettings = () => {
   theme.onchange = () => ui.theme.apply(theme.value);
   const rules = h('textarea', { rows: 8, value: prefs.rules || '', placeholder: 'Общие инструкции для новых диалогов' });
   const auto = h('input', { type: 'checkbox', checked: prefs.autoSwitch !== false });
+  const showRings = h('input', { type: 'checkbox', checked: prefs.showAccountRings !== false, onchange: async () => { prefs.showAccountRings = showRings.checked; await settings.set('showAccountRings', showRings.checked); await renderQuotas(); } });
   const sandbox = h('select', {}, ...['read-only', 'workspace-write', 'danger-full-access'].map(s => h('option', { value: s, selected: s === (prefs.sandbox || 'workspace-write') }, s)));
-  const body = h('div.panel-body.settings', {}, h('label', {}, 'Тема', theme), h('label', {}, 'Правила', rules), h('label', {}, 'Доступ к файлам', sandbox), h('label.inline', {}, auto, 'Переключать аккаунт при исчерпании лимита'),
+  const body = h('div.panel-body.settings', {}, h('label', {}, 'Тема', theme), h('label.inline', {}, showRings, 'Показывать панель лимитов под чатом'), h('label', {}, 'Правила', rules), h('label', {}, 'Доступ к файлам', sandbox), h('label.inline', {}, auto, 'Переключать аккаунт при исчерпании лимита'),
     button('Сохранить', async () => { for (const [k, v] of Object.entries({ rules: rules.value, sandbox: sandbox.value, autoSwitch: auto.checked })) { await settings.set(k, v); prefs[k] = v; } panel.close(); }, 'primary'));
   body.append(h('section',{},h('h3',{},'Подключения'),h('div.actions',{},...[["telegram","Telegram"],["api","API-подключения"],["support","Сервер / Бот"],["updater","Обновления"]].map(([id,label])=>button(label,()=>ui.openPanel(id))))));
   for (const s of ui.settings) { const el = h('section', {id:`settings-${s.id}`},h('h3',{},s.title)); s.render(el); body.append(el); }
@@ -675,8 +676,9 @@ async function renderQuotas() {
     let claude;try{claude=typeof state?.claude==='string'?JSON.parse(state.claude):state?.claude;}catch{}
     const cl=k=>{const r=claude?.rate_limits?.[k];return r&&{remaining_percent:typeof r.used_percentage==='number'?100-r.used_percentage:NaN,resets_at:r.resets_at};};
     ringBar.replaceChildren(...rows.map(acc=>tile(acc.name,acc.home||accounts.find(a=>a.name===acc.name)?.home||'',pickWindow(acc,false),pickWindow(acc,true))),
-      ...(claude?.rate_limits?[tile('Claude','',cl('five_hour'),cl('seven_day'),'.claude')]:[]));
-    ringBar.hidden=!ringBar.childElementCount;
+      ...(claude?.rate_limits?[tile('Claude','',cl('five_hour'),cl('seven_day'),'.claude')]:[]),
+      h('button.ring-hide', { type: 'button', title: 'Скрыть панель лимитов', 'aria-label': 'Скрыть панель лимитов', onclick: async () => { prefs.showAccountRings = false; ringBar.hidden = true; await settings.set('showAccountRings', false); } }, '×'));
+    ringBar.hidden=prefs.showAccountRings === false || ringBar.childElementCount < 2;
   } catch { /* Ошибки обновления показывает сам виджет. */ }
 }
 await on('limits',renderQuotas);

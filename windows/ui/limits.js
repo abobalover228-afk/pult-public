@@ -69,7 +69,8 @@ function renderDock() {
   const glass = h('div.dk-glass' + (state.loading ? '.loading' : ''), {},
     ...list.map(a => withMenu(tile(a.name, pick(a, false), pick(a, true), a.plan, (a.name === best ? '.best' : '') + (lowest(a) === 0 ? '.out' : '')), { ...a, home: a.home || (state.names || []).find(n => n.name === a.name)?.home })),
     claude?.rate_limits ? tile('Claude', cl('five_hour'), cl('seven_day'), 'Claude Code', '.claude') : null);
-  glass.onpointerdown = e => { if (e.button === 0 && !e.target.closest('.dk-tile')) action('drag'); };
+  glass.append(h('button.dk-hide', { type: 'button', title: 'Скрыть виджет', onclick: () => action('toggle') }, '×'));
+  glass.onpointerdown = e => { if (e.button === 0 && !e.target.closest('button')) action('drag'); };
   glass.ondblclick = e => { if (!e.target.closest('.dk-tile')) action('dock'); };
   glass.oncontextmenu = e => { e.preventDefault(); action('menu'); };
   glass.title = 'Перетащи, чтобы сдвинуть. Двойной щелчок — вернуть вниз по центру. Правый щелчок по кольцу — действия с аккаунтом';

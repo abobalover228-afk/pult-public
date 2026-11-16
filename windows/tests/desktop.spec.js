@@ -633,3 +633,14 @@ test('sidebar trash opens recoverable history without restoring everything',asyn
  await expect(page.locator('button.thread')).toHaveCount(0);
  expect(await page.evaluate(()=>window.calls.filter(r=>r.method==='set'&&r.args.key==='hidden').at(-1).args.value)).toEqual([]);
 });
+
+test('account rings can be hidden and restored in settings', async ({ page }) => {
+  await desktop(page);
+  const bar = page.getByLabel('Лимиты аккаунтов');
+  await expect(bar).toBeVisible();
+  await page.getByRole('button', { name: 'Скрыть панель лимитов', exact: true }).click();
+  await expect(bar).toBeHidden();
+  await page.locator('.toolbar-actions').getByRole('button', { name: 'Настройки', exact: true }).click();
+  await page.getByLabel('Показывать панель лимитов под чатом').check();
+  await expect(bar).toBeVisible();
+});
