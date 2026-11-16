@@ -1,0 +1,22 @@
+{
+  "name": "pult-desktop",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs",
+    "test": "playwright test",
+    "check": "node scripts/check-js.mjs",
+    "dev": "tauri dev",
+    "build:windows": "tauri build --config tauri.windows.conf.json --bundles nsis --ci -- --locked",
+    "check:windows": "node scripts/check-windows-native.mjs",
+    "test:rtc:native": "node scripts/test-rtc-native.mjs"
+  },
+  "dependencies": {
+    "dompurify": "3.4.18",
+    "marked": "18.2.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@tauri-apps/cli": "2.12.5"
+  }
+}

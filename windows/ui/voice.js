@@ -1,0 +1,10 @@
+import {call,ui,h,settings} from './core.js';
+import {button} from './render.js';
+let listening=false,playback=false,epoch=0,speak=false,handsfree=false,language='ru-RU';
+const stop=async()=>{epoch++;listening=false;playback=false;await call('voice','stop');};
+async function dictate(){if(listening)return stop();const chat=ui.chats.current(),run=++epoch;listening=true;ui.toast('Микрофон включён. Повторное нажатие остановит запись.');try{const result=await call('voice','listen',{language});if(run!==epoch||ui.chats.current()!==chat)return;if(result.text){if(handsfree)await ui.chats.send(result.text,{chat,literal:true,origin:'voice'});else ui.chats.insert(result.text);}}finally{if(run===epoch)listening=false;}}
+ui.addComposerButton({id:'voice',title:'Диктовка',icon:'🎙',run:()=>{dictate().catch(ui.toast);}});
+ui.addSettings({id:'voice',title:'Голос Windows',render(el){const lang=h('input',{value:language,placeholder:'ru-RU'}),speech=h('input',{type:'checkbox',checked:speak}),hands=h('input',{type:'checkbox',checked:handsfree});el.append(h('p',{},'Используется системный System.Speech. Нужен установленный речевой пакет языка. Запись включается кнопкой микрофона.'),h('label',{},'Язык ',lang),h('label',{},speech,' Озвучивать ответы'),h('label',{},hands,' Отправлять распознанную речь'),button('Сохранить голос',async()=>{language=lang.value;speak=speech.checked;handsfree=hands.checked;await settings.set('voice',{language,speak,handsfree})}),button('Остановить голос',stop));}});
+await ui.ready;
+ui.chats.onEvent(e=>{if((e.type==='open'||e.type==='close')&&(listening||playback)){stop().catch(ui.toast);return;}if(e.type==='turnEnd'&&speak&&!e.failed&&e.chat===ui.chats.current()){const text=[...e.chat.messages].reverse().find(m=>m.kind==='agent')?.text;if(text){playback=true;const run=++epoch;call('voice','speak',{text,language}).catch(ui.toast).finally(()=>{if(run===epoch)playback=false;});}}});
+const saved=await settings.get('voice');if(saved){language=saved.language||language;speak=!!saved.speak;handsfree=!!saved.handsfree;}

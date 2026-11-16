@@ -21,18 +21,26 @@ export function h(spec, props = {}, ...kids) {
 
 const bus = new EventTarget();
 const changed = () => bus.dispatchEvent(new Event('change'));
+let resolveReady;
+const ready = new Promise(resolve => resolveReady = resolve);
 export const ui = {
+  ready,
+  markReady() { resolveReady(); },
+  providers: [],
+  setProviders(rows) { this.providers = rows; changed(); },
   commands: new Map(),   // slash-команды: {name, hint, run(args, chat)}
   sidebar: [],           // кнопки сайдбара: {id, title, icon, open(), badge?()}
   panels: new Map(),     // панели: {id, title, slot: 'main'|'left'|'right'|'sheet', render(el)}
   settings: [],          // разделы настроек: {id, title, render(el)}
+  statusbar: [],
+  addStatusButton(b) { this.statusbar.push(b); changed(); },
   composer: [],          // кнопки у поля ввода: {id, title, icon, run(chat)}
   addCommand(c) { this.commands.set(c.name, c); changed(); },
   addSidebar(b) { this.sidebar.push(b); changed(); },
-  addPanel(p) { this.panels.set(p.id, p); changed(); },
+  addPanel(p) { if (this.panels.has(p.id)) this.remove('panels', p.id); this.panels.set(p.id, p); changed(); },
   addSettings(s) { this.settings.push(s); changed(); },
   addComposerButton(b) { this.composer.push(b); changed(); },
-  remove(kind, id) { const c = this[kind]; c instanceof Map ? c.delete(id) : c.splice(0, c.length, ...c.filter(x => x.id !== id)); changed(); },
+  remove(kind, id) { if (kind === 'panels') { const p = this.panels.get(id); this.closePanel(id); p?.dispose?.(); } const c = this[kind]; c instanceof Map ? c.delete(id) : c.splice(0, c.length, ...c.filter(x => x.id !== id)); changed(); },
   /** Оболочка перерисовывает свои списки по этому событию. */
   onChange(fn) { bus.addEventListener('change', fn); },
   // Ниже — реализует chat.js (до его загрузки вызывать нельзя; вызывайте из обработчиков, а не при импорте):

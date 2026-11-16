@@ -20,3 +20,5 @@ history/
 *.key
 *.p12
 .swiftpm/
+
+/test-results/
