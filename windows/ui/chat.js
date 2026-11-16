@@ -209,6 +209,9 @@ function renderFeed() {
 }
 feed.onscroll = () => follow = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 100;
 function pending(m) { const c = chats.find(c => c.id === m.chat); if (!c?.busy || m.done || m.gen !== c.gen) throw new Error('Запрос уже неактивен'); }
+function canAutoApprove(m) {
+  return m.kind === 'approval' && (m.claude || ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'item/permissions/requestApproval', 'execCommandApproval', 'applyPatchApproval'].includes(m.method));
+}
 async function respond(m, result) {
   pending(m);
   if (m.claude) {
@@ -381,7 +384,7 @@ await on('codex', async e => {
   if (e.id != null) {
     if (e.method === 'item/tool/requestUserInput' || e.method.includes('requestApproval') || ['execCommandApproval', 'applyPatchApproval', 'mcpServer/elicitation/request'].includes(e.method)) {
       const m = add(c, e.method === 'item/tool/requestUserInput' ? 'question' : 'approval', p.reason || p.command || 'Подтверди действие', undefined, { chat: c.id, gen: c.gen, rpcId: e.id, method: e.method, params: p });
-      if (c.autoApprove && ['item/commandExecution/requestApproval', 'item/fileChange/requestApproval', 'execCommandApproval', 'applyPatchApproval'].includes(e.method)) await answer(m, true);
+      if (c.autoApprove && canAutoApprove(m)) await answer(m, true);
     } else await call('codex', 'respond', { chat: c.id, gen: e.gen, id: e.id, error: `Пока не поддерживается: ${e.method}` }); return;
   }
   if (p.threadId && c.thread && p.threadId !== c.thread) return;
@@ -644,6 +647,11 @@ ui.chats.switchAccount = async (c, home) => {
   await ui.chats.restart(c); c.account = home; if (c === active) header(); await saveConversation(c);
 };
 ui.chats.refresh = c => { if (c === active) { header(); renderFeed(); } };
+ui.chats.setAutoApprove = async (c, enabled) => {
+  c.autoApprove = enabled;
+  if (c === active) header();
+  if (enabled && c.busy) for (const m of c.messages.filter(m => !m.done && m.gen === c.gen && canAutoApprove(m))) await answer(m, true);
+};
 ui.chats.history = async () => { search.focus(); await loadHistory(); };
 ui.chats.resumeQueue = async c => { c.queuePaused = false; if (!c.busy && c.queue.length) await run(c, c.queue.shift()); header(); };
 ui.chats.answer = async (chatId, messageId, value) => {

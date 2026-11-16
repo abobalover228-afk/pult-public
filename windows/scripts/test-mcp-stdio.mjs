@@ -20,7 +20,8 @@ child.on('close', code => {
   const replies = stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.equal(replies.length, 3);
   assert.equal(replies[0].result.serverInfo.name, 'pult-computer');
-  assert.equal(replies[1].result.tools[0].name, 'computer');
+  if (process.platform === 'win32') assert.equal(replies[1].result.tools[0].name, 'computer');
+  else assert.deepEqual(replies[1].result.tools, []);
   assert.equal(replies[2].result.isError, true);
   assert.match(replies[2].result.content[0].text, /выключен/);
   assert.ok(!replies.some(r => JSON.stringify(r).includes('image/png')));

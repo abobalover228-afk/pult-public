@@ -3680,7 +3680,7 @@ dependencies = [
 
 [[package]]
 name = "pult"
-version = "2.4.1"
+version = "2.4.2"
 dependencies = [
  "base64 0.23.1",
  "dirs 5.0.1",

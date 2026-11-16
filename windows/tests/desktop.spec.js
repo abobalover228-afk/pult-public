@@ -448,6 +448,33 @@ test('CLI arguments retain Windows paths and shell metacharacters without shell 
   expect(result).toEqual({ words: ['exec', '--cd', 'C:\\Users\\Брат\\My Project', '$(touch /tmp/nope)', ''], rejected: true });
 });
 
+test('auto approval can be toggled during a turn and drains pending actions only', async ({ page }) => {
+  await desktop(page);
+  await page.getByLabel('Сообщение', { exact: true }).fill('Task');
+  await page.getByRole('button', { name: 'Отправить ↑', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.calls.some(r => r.args?.method === 'turn/start'))).toBe(true);
+  const identity = await chatIdentity(page);
+  await event(page, identity, 'item/commandExecution/requestApproval', { command: 'test' }, 10);
+  await event(page, identity, 'item/tool/requestUserInput', { questions: [] }, 11);
+  await event(page, identity, 'mcpServer/elicitation/request', {}, 12);
+  const toggle = page.getByRole('button', { name: 'Подтверждать за меня', exact: true });
+  page.on('dialog', dialog => dialog.dismiss());
+  await toggle.click();
+  await expect(toggle).toHaveClass(/active/);
+  const permissions = { fileSystem: { write: ['/tmp/example'] } };
+  await event(page, identity, 'item/permissions/requestApproval', { permissions }, 13);
+  await event(page, identity, 'item/fileChange/requestApproval', {}, 14);
+  expect(await page.evaluate(() => window.calls.filter(r => r.method === 'respond').map(r => ({ id: r.args.id, result: r.args.result })))).toEqual([
+    { id: 10, result: { decision: 'accept' } },
+    { id: 13, result: { permissions, scope: 'turn' } },
+    { id: 14, result: { decision: 'accept' } },
+  ]);
+  await toggle.click();
+  await expect(toggle).not.toHaveClass(/active/);
+  await event(page, identity, 'execCommandApproval', {}, 15);
+  expect(await page.evaluate(() => window.calls.filter(r => r.method === 'respond').map(r => r.args.id))).toEqual([10, 13, 14]);
+});
+
 test('provider exit completes failed turns and expires pending approvals', async ({ page }) => {
   await desktop(page);
   await page.getByLabel('Сообщение', { exact: true }).fill('Task');

@@ -45,6 +45,10 @@ fn main() {
     if limits::cli() {
         return;
     }
+    if computer::mcp_mode() && !cfg!(windows) {
+        computer::serve_stdio();
+        return;
+    }
     let mut context = tauri::generate_context!();
     if computer::mcp_mode() {
         let w = &mut context.config_mut().app.windows[0];

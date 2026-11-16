@@ -212,13 +212,11 @@ command('multi', 'Передать задачу главному агенту к
   if (!arg.trim()) throw new Error('/multi задача');
   return ui.chats.send(`Работай как главный мультиагентной команды. Раздели задачу на независимые части и запусти субагентов параллельно. Каждому дай полное задание и свои файлы. Мелочь делай сам. Когда все закончат, проверь диффы, сборку и тесты, исправь ошибки. Дай итог: что сделано, чем проверено, что нет.\n\nЗадача:\n${arg}`, { chat: c, literal: true, attachments });
 });
-command('approvals', 'Автоподтверждение команд и правок: on/off', (arg, c) => {
+command('approvals', 'Автоподтверждение команд и правок: on/off', async (arg, c) => {
   if (!['codex', 'claude'].includes(c.target)) throw new Error('API-подключение не запрашивает инструменты');
-  if (c.busy) throw new Error('Сначала заверши текущий ход');
   arg = arg.trim().toLowerCase();
   if (arg && !['on', 'off'].includes(arg)) throw new Error('/approvals [on|off]');
-  if (arg === 'on' && !c.autoApprove && !confirm('Автоматически разрешать команды и изменения файлов в этом чате? Вопросы пользователя остаются ручными.')) return;
-  if (arg) c.autoApprove = arg === 'on';
+  if (arg) await ui.chats.setAutoApprove(c, arg === 'on');
   note(c, `Автоподтверждение команд и правок: ${c.autoApprove ? 'включено' : 'выключено'}`);
 });
 

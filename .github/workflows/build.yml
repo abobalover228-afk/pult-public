@@ -34,6 +34,8 @@ jobs:
       - run: npm test
       - run: cargo test --locked
       - run: npm run build:macos
+      - run: node scripts/test-mcp-stdio.mjs target/release/pult
+      - run: target/release/pult --smoke-test
       - name: Package app
         run: ditto -c -k --sequesterRsrc --keepParent 'target/release/bundle/macos/Пульт Rust.app' Pult-Rust-macOS-arm64.zip
       - uses: actions/upload-artifact@v4
@@ -41,3 +43,8 @@ jobs:
           name: Pult-Rust-macOS-arm64
           path: windows/Pult-Rust-macOS-arm64.zip
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: macOS-test-results
+          path: windows/test-results
