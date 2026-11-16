@@ -9,7 +9,8 @@
     "dev": "tauri dev",
     "build:windows": "tauri build --config tauri.windows.conf.json --bundles nsis --ci -- --locked",
     "check:windows": "node scripts/check-windows-native.mjs",
-    "test:rtc:native": "node scripts/test-rtc-native.mjs"
+    "test:rtc:native": "node scripts/test-rtc-native.mjs",
+    "build:macos": "tauri build --config tauri.macos.conf.json --bundles app --ci -- --locked"
   },
   "dependencies": {
     "dompurify": "3.4.18",

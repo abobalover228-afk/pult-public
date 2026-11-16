@@ -23,6 +23,14 @@ npm run dev
 
 На macOS можно проверить оболочку и платформонезависимую логику.
 
+## Сборка Rust-версии для macOS
+
+```sh
+npm run build:macos
+```
+
+Приложение: `target/release/bundle/macos/Пульт Rust.app`. Имя и bundle ID (`local.pult.rust`) отдельные от Swift-приложения. Архитектура соответствует машине сборки: на Apple Silicon — ARM64. Конфигурация — `tauri.macos.conf.json`. Голос System.Speech и управление экраном этого порта доступны только на Windows.
+
 ## Проверки и сборка
 
 ```sh
