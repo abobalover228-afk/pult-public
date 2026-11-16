@@ -1,0 +1,59 @@
+{
+  "format": 2,
+  "id": "native-team",
+  "name": "Одна команда · внутри Пульта",
+  "version": "3.0.0",
+  "author": "Pult",
+  "description": "Общие задачи, прямой диалог встроенных агентов и автоматическое назначение. Использует обычные чаты и комнату Пульта.",
+  "permissions": [
+    "team.read",
+    "team.write",
+    "chats.read",
+    "background"
+  ],
+  "settings": {
+    "automatic": "Нет",
+    "slots": "1"
+  },
+  "commands": [
+    {
+      "name": "open",
+      "title": "Открыть команду",
+      "script": "await pult.call('ui.openPanel',{panel:'team'});",
+      "shortcut": "cmd+shift+j"
+    }
+  ],
+  "panels": [
+    {
+      "id": "team",
+      "title": "Одна команда",
+      "html": "<!doctype html><meta charset=\"utf-8\"><style>*{box-sizing:border-box}body{margin:0;background:#191b20;color:#eef0f5;font:14px system-ui;padding:26px}h1{font-size:25px;margin:0}p{line-height:1.6;color:#aeb5c6}.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.card{background:#232730;border:1px solid #363d4a;border-radius:13px;padding:18px;margin-top:18px}button{border:0;border-radius:8px;padding:10px 14px;background:#98ddc1;color:#122a20;cursor:pointer;font:600 13px system-ui}button.alt{background:#374152;color:#eee}textarea,select{background:#161a22;border:1px solid #444c5c;color:#eee;padding:10px;border-radius:8px;font:inherit}textarea{width:100%;resize:vertical}.muted,small{color:#abb4c4}#status{padding:7px 12px;background:#293d36;border-radius:99px}.task{padding:12px 0;border-bottom:1px solid #343b49}.task small{display:block;margin-top:6px}#error{color:#ffb0b0;white-space:pre-wrap}</style>\n<div class=\"row\"><h1>Одна команда</h1><span id=\"status\">Подключение к Пульту…</span></div>\n<p>Ваши обычные агенты Пульта, общий чат и одна доска задач. Каждый использует свой аккаунт и свои лимиты. Папки и Git-ветки задач готовит Пульт.</p>\n<div class=\"row\"><button id=\"setup\">Комната и GitHub</button><button class=\"alt\" id=\"open\">Общий чат и задачи</button><button class=\"alt\" id=\"back\">К личному чату</button></div>\n<div class=\"card\"><h2>Общая цель</h2><textarea id=\"goal\" rows=\"3\" placeholder=\"Что делаем вместе и как проверим результат?\"></textarea><p>Создатель подключает репозиторий комнаты. Здесь можно добавить задачу планировщику: он изучит проект и разложит цель на самостоятельные карточки.</p><button id=\"plan\">Добавить планировщику</button></div>\n<div class=\"card\"><div class=\"row\"><b>Мои агенты</b><select id=\"slots\"><option value=\"1\">1 одновременно</option><option value=\"2\">2 одновременно</option><option value=\"3\">3 одновременно</option></select><button id=\"start\">Брать свободные задачи</button><button class=\"alt\" id=\"pause\">Не брать новые</button></div><p id=\"budget\"></p><small>«Не брать новые» оставляет уже работающих агентов. Остановить их можно в обычных чатах Пульта. В общем чате есть отдельный выключатель диалога агентов и предел восьми автоответов на агента. Код остаётся в отдельных ветках; отправка и PR — после твоего подтверждения.</small><p><button class=\"alt\" id=\"limits\">Настройки и ещё 20 назначений</button></p></div>\n<div class=\"card\"><h2>Доска</h2><div id=\"tasks\"></div></div><p id=\"error\"></p>\n<script>\nconst $=id=>document.getElementById(id);let last=0,busy=false;\nasync function action(method,params={}){try{$('error').textContent='';return await pult.call(method,params)}catch(e){$('error').textContent=String(e);throw e}}\n$('setup').onclick=()=>action('ui.teamSettings');$('open').onclick=()=>action('ui.openTeam');$('back').onclick=()=>action('ui.openChat');$('limits').onclick=()=>action('ui.modSettings');\n$('slots').onchange=()=>action('settings.set',{key:'slots',value:$('slots').value});$('start').onclick=async()=>{await action('settings.set',{key:'automatic',value:'Да'});await action('ui.openTeam')};$('pause').onclick=()=>action('settings.set',{key:'automatic',value:'Нет'});\n$('plan').onclick=async()=>{const goal=$('goal').value.trim();if(!goal)return;await action('team.addTask',{title:'Разобрать цель: '+goal.slice(0,130),detail:'Общая цель: '+goal+'\\nСначала изучи проект. Сам код пока не меняй. Раздели цель на 2–5 независимых задач без пересечения файлов. Для каждой укажи файлы, контракт и критерий проверки. В конце верни блок ```pult-tasks с валидным JSON-массивом объектов title и detail, до пяти задач. Не делай push/merge/PR.'});$('goal').value=''};\npult.on('app.tick',async()=>{if(busy||Date.now()-last<1500)return;last=Date.now();busy=true;try{const [state,settings,info]=await Promise.all([pult.call('team.state'),pult.call('settings.get'),pult.call('app.info')]);$('status').textContent=state.connected?'На связи: '+state.peers:'Комната не открыта';$('budget').textContent=(settings.automatic==='Да'?'Автоназначение включено':'Автоназначение выключено')+' · осталось назначений: '+info.remainingTurns+(state.blockReason?' · '+state.blockReason:'');if(document.activeElement!==$('slots'))$('slots').value=settings.slots;$('tasks').replaceChildren();for(const task of state.board.tasks){const node=document.createElement('div');node.className='task';node.textContent=task.title;const meta=document.createElement('small');meta.textContent=task.status+(task.ownerName?' · '+task.ownerName:'');node.append(meta);$('tasks').append(node)}}catch(e){$('error').textContent=String(e)}finally{busy=false}});\n</script>",
+      "placement": "main"
+    }
+  ],
+  "sidebar": [
+    {
+      "id": "team",
+      "title": "Одна команда",
+      "icon": "person.3.fill",
+      "panel": "team"
+    }
+  ],
+  "toolbar": [
+    {
+      "id": "team",
+      "title": "Одна команда",
+      "icon": "person.3.fill",
+      "panel": "team"
+    }
+  ],
+  "statusbar": [
+    {
+      "id": "team",
+      "title": "Одна команда",
+      "icon": "puzzlepiece.extension",
+      "panel": "team"
+    }
+  ],
+  "background": "let running=false,last=0;\npult.on('app.tick',async()=>{\n if(running||Date.now()-last<2000)return;last=Date.now();running=true;\n try{const config=await pult.call('settings.get');if(config.automatic!=='Да')return;\n const state=await pult.call('team.state');if(!state.ready||!state.canClaim||state.working)return;\n const room=await pult.call('app.info');if(room.remainingTurns<=0){await pult.call('settings.set',{key:'automatic',value:'Нет'});await pult.call('log',{message:'20 автоходов использованы. Добавь ходы в настройках мода.'});return}\n const capacity=Math.max(0,Math.min(3,Number(config.slots)||1)-(state.running||[]).length);\n const tasks=state.board.tasks.filter(t=>t.status==='available').slice(0,Math.min(capacity,room.remainingTurns));\n if(tasks.length)await pult.call('team.claim',{ids:tasks.map(t=>t.id)});\n }catch(e){await pult.call('log',{message:String(e)})}finally{running=false}\n});\npult.on('chat.finished',async event=>{\n if(!event.teamTask)return;\n try{const config=await pult.call('settings.get');if(config.automatic!=='Да')return;\n await pult.call('team.send',{text:(event.failed?'Агент остановился: ':'Результат агента: ')+String(event.text||'').slice(0,3500)})}\n catch(e){await pult.call('log',{message:String(e)})}\n});"
+}

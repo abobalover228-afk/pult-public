@@ -1,0 +1,36 @@
+{
+  "format": 2,
+  "id": "sdk-playground",
+  "name": "SDK · инструменты разработчика",
+  "version": "1.0.0",
+  "author": "Pult",
+  "description": "Пример настоящего API, отдельной боковой панели и отказа недостающих прав.",
+  "permissions": [
+    "chats.read",
+    "files.read"
+  ],
+  "commands": [
+    {
+      "name": "open",
+      "title": "Открыть SDK",
+      "script": "await pult.call('ui.openPanel',{panel:'inspect'});",
+      "shortcut": "cmd+alt+m"
+    }
+  ],
+  "panels": [
+    {
+      "id": "inspect",
+      "title": "SDK 2",
+      "html": "<!doctype html><meta charset=\"utf-8\"><style>body{background:#191b20;color:#eee;font:14px system-ui;padding:24px}button{padding:10px;margin:5px}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style><h1>SDK 2 — живая проверка API</h1><p>Кнопки работают через настоящий мост Пульта. Эта панель не имеет права запускать агентов или писать файлы.</p><button onclick=\"run('app.info')\">Пульт и мод</button><button onclick=\"run('chats.list')\">Открытые чаты</button><button onclick=\"run('files.list')\">Файлы проекта</button><button onclick=\"run('chats.send',{text:'Проверка отказа прав'})\">Проверить отказ записи</button><button onclick=\"run('storage.set',{key:'example',value:{saved:true}})\">Сохранить свои данные</button><button onclick=\"run('storage.get',{key:'example'})\">Прочитать свои данные</button><pre id=out></pre><script>async function run(method,params={}){try{out.textContent=JSON.stringify(await pult.call(method,params),null,2)}catch(e){out.textContent=String(e)}}pult.on('chats.changed',e=>console.log(e));</script>",
+      "placement": "right"
+    }
+  ],
+  "sidebar": [
+    {
+      "id": "inspect",
+      "title": "Инструменты SDK",
+      "icon": "wrench.and.screwdriver",
+      "panel": "inspect"
+    }
+  ]
+}

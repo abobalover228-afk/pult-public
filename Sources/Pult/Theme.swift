@@ -96,13 +96,21 @@ struct RootView: View {
         ZStack(alignment: .top) {
             HStack(spacing: 0) {
                 if workspace.sidebar { SidebarView(workspace: workspace, chat: workspace.active); Divider().opacity(0.25) }
-                if workspace.showTeamChat { TeamChatPanel(workspace: workspace); Divider().opacity(0.25) }
-                ChatView(chat: workspace.active, workspace: workspace).id(workspace.active.sessionID)
-                if workspace.showTeamTasks { Divider().opacity(0.25); TeamTasksPanel(workspace: workspace) }
+                if workspace.showTeamChat && mods.mainPanelID == nil { TeamChatPanel(workspace: workspace); Divider().opacity(0.25) }
+                if let key = mods.leftPanelID { ModDockView(key: key, placement: "left").frame(width: 330); Divider().opacity(0.25) }
+                if let key = mods.mainPanelID {
+                    ModDockView(key: key, placement: "main")
+                } else { ChatView(chat: workspace.active, workspace: workspace).id(workspace.active.sessionID) }
+                if let key = mods.rightPanelID { Divider().opacity(0.25); ModDockView(key: key, placement: "right").frame(width: 360) }
+                if workspace.showTeamTasks && mods.mainPanelID == nil { Divider().opacity(0.25); TeamTasksPanel(workspace: workspace) }
             }
             if let toast = workspace.toast { ToastView(text: toast).transition(.opacity) }
             if workspace.showPalette { PaletteView(workspace: workspace) }
         }
+        .sheet(isPresented: Binding(get: { mods.panelID != nil }, set: { if !$0 { mods.panelID = nil } })) {
+            if let key = mods.panelID { ModDockView(key: key.contains("/") ? key : key + "/main", placement: "sheet").frame(width: 800, height: 650) }
+        }
+        .sheet(isPresented: $workspace.showTeamRoom) { TeamRoomView(workspace: workspace) }
         .sheet(isPresented: $workspace.showGuide) { GuideView() }
         .background(PultBackground())
         .preferredColorScheme(.dark)
@@ -311,10 +319,12 @@ struct SidebarView: View {
                     }.padding(.vertical, 3).contentShape(Rectangle())
                 }.buttonStyle(.plain).help("Остаток за 5 часов и неделю у «\(account.name)». Нажми — перейти на аккаунт")
             }
+            ModActionButtons(location: "sidebar")
             Button { workspace.showTeamRoom = true } label: {
                 Label("Общий проект", systemImage: "person.2.fill").font(uiFont)
             }.buttonStyle(.plain).padding(.vertical, 6)
             HStack(spacing: 8) {
+                ModActionButtons(location: "statusbar")
                 if telegram.configured {
                     Label(telegram.paired ? "Telegram" : "Telegram: нужен код", systemImage: "paperplane.fill").font(.system(size: 10.5))
                         .foregroundColor(telegram.status.hasPrefix("работает") ? Color(red: 0.4, green: 0.7, blue: 1) : .orange)
@@ -461,6 +471,7 @@ struct ChatView: View {
             Text(chat.title).font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.tail)
             StatusPill(status: chat.status)
             Spacer(minLength: 8)
+            ModActionButtons(location: "toolbar")
             Button { workspace.showTeamChat.toggle() } label: { Image(systemName: "bubble.left.and.bubble.right") }.help("Чат команды")
             Button { workspace.showTeamTasks.toggle() } label: { Image(systemName: "checklist") }.help("Общая доска задач")
             accountMenu
@@ -623,7 +634,7 @@ struct ChatView: View {
         .alert(item: $chat.pendingNativeAction) { action in
             Alert(title: Text(action.title), message: Text(action.message), primaryButton: .destructive(Text("Выполнить")) { action.perform() }, secondaryButton: .cancel())
         }
-        .sheet(isPresented: $workspace.showTeamRoom) { TeamRoomView(workspace: workspace) }
+
         .sheet(isPresented: $ui.showSettings) { SettingsView(chat: chat, close: { ui.showSettings = false }) }
     }
 
@@ -930,16 +941,9 @@ struct SettingsView: View {
             }.formStyle(.grouped)
             HStack { Spacer(); Button("Готово", action: close).keyboardShortcut(.defaultAction) }.padding([.horizontal, .bottom], 16)
         }
-        .frame(width: 720, height: 600)
+        .frame(width: 600, height: 560)
         .onAppear { form.remote = updater.remote; form.tab = UserDefaults.standard.string(forKey: "settingsTab") ?? "work" }
-        .sheet(isPresented: Binding(get: { mods.panelID != nil }, set: { if !$0 { mods.panelID = nil } })) {
-            if let mod = mods.mods.first(where: { $0.id == mods.panelID && mods.enabled.contains($0.id) }) {
-                VStack {
-                    HStack { Text(mod.panel?.title ?? mod.name).font(.headline); Spacer(); Button("Закрыть") { mods.panelID = nil } }.padding()
-                    ModPanel(mod: mod, settings: mods.settings(for: mod)).id(mod.id)
-                }.frame(width: 680, height: 500)
-            }
-        }
+
     }
 
     @ViewBuilder var workSection: some View {
@@ -1039,7 +1043,7 @@ struct SettingsView: View {
                 }
             }
             LabeledContent("Состояние", value: proxy.status)
-            Text(proxy.available ? "Через VLESS идут Codex, Claude, Telegram и обновления, запущенные из Пульта. Остальной Mac не затрагивается. Свободные чаты переподключаются сами." : "Положи ссылку vless://… в ~/Library/Application Support/PultPublic/vless.txt и xray в ~/Library/Application Support/PultPublic/bin/xray — после этого переключатель станет активным.")
+            Text(proxy.available ? "Через VLESS идут Codex, Claude, Telegram и обновления, запущенные из Пульта. Остальной Mac не затрагивается. Свободные чаты переподключаются сами." : "Положи ссылку vless://… в ~/Documents/pult/vless.txt и xray в ~/Documents/pult/bin/xray — после этого переключатель станет активным.")
                 .font(.caption).foregroundColor(.secondary)
         }
     }

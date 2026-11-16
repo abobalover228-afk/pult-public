@@ -131,7 +131,7 @@ final class LimitsStore: ObservableObject {
 }
 
 final class Workspace: ObservableObject {
-    static let shared = Workspace()
+    static let shared = Workspace(connectImmediately: !CommandLine.arguments.contains("--mod-preview") && !CommandLine.arguments.contains("--smoke-test"))
     @Published var chats: [Chat] = []
     @Published var activeID = UUID()
     @Published var toast: String?
@@ -144,6 +144,7 @@ final class Workspace: ObservableObject {
     @Published var sidebar = UserDefaults.standard.object(forKey: "sidebar") as? Bool ?? true {
         didSet { UserDefaults.standard.set(sidebar, forKey: "sidebar") }
     }
+    private let connectImmediately: Bool
     private var links: [UUID: AnyCancellable] = [:]
     private var toastToken = UUID()
 
@@ -152,6 +153,7 @@ final class Workspace: ObservableObject {
     var waiting: Int { chats.filter { $0.status.needsYou }.count }
 
     init(connectImmediately: Bool = true) {
+        self.connectImmediately = connectImmediately
         let first = Chat(connectImmediately: connectImmediately)
         attach(first)
         chats = [first]; activeID = first.sessionID
@@ -176,13 +178,13 @@ final class Workspace: ObservableObject {
 
     // MARK: вкладки
 
-    @discardableResult func newChat(select: Bool = true, inherit: Bool = true) -> Chat {
-        if let empty = chats.first(where: { $0.isEmptyDraft }) {      // пустой уже есть — не плодим
+    @discardableResult func newChat(select: Bool = true, inherit: Bool = true, forceNew: Bool = false) -> Chat {
+        if !forceNew, let empty = chats.first(where: { $0.isEmptyDraft }) {      // пустой уже есть — не плодим
             if select { activate(empty) }
             return empty
         }
         let source = active
-        let chat = Chat(primary: false)
+        let chat = Chat(connectImmediately: connectImmediately, primary: false)
         if inherit {
             chat.cwd = source.cwd
             if source.target != chat.target { chat.target = source.target }
@@ -195,6 +197,7 @@ final class Workspace: ObservableObject {
     }
 
     func activate(_ chat: Chat) {
+        ModStore.shared.mainPanelID = nil
         if activeID != chat.sessionID { Voice.shared.stop() }
         activeID = chat.sessionID
         if chat.unread { chat.unread = false }
@@ -234,7 +237,13 @@ final class Workspace: ObservableObject {
     // MARK: события чатов → уведомления
 
     private func handle(_ chat: Chat, _ event: ChatEvent) {
+        let teamTask = TeamRoomModel.shared.running[chat.sessionID]?.uuidString
         TeamRoomModel.shared.agentEvent(chat, event)
+        switch event {
+        case .finished(_, let failed): ModPlatform.shared.emit("chat.finished", ["id": chat.sessionID.uuidString, "failed": failed, "text": chat.lastAnswer, "teamTask": teamTask ?? ""], permission: "chats.read")
+        case .needsApproval: ModPlatform.shared.emit("chat.approval", ["id": chat.sessionID.uuidString], permission: "chats.read")
+        case .needsAnswer: ModPlatform.shared.emit("chat.question", ["id": chat.sessionID.uuidString], permission: "chats.read")
+        }
         let appActive = NSApp?.isActive ?? true
         let visible = appActive && chat.sessionID == activeID
         switch event {

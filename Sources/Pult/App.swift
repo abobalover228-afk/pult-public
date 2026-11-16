@@ -5,10 +5,17 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         if CommandLine.arguments.contains("--smoke-test") {
-            guard Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == "2.3.0",
+            guard Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == "2.4.0",
                   Bundle.main.url(forResource: "PultAppIcon", withExtension: "icns") != nil else { exit(1) }
-            print("PASS: Pult 2.3 app launch, linked WebRTC and bundle resources")
+            print("PASS: Pult 2.4 app and mod SDK 2 launch, linked WebRTC and bundle resources")
             exit(0)
+        }
+        ModStore.shared.installBuiltIn()
+        ModPlatform.shared.start()
+        if CommandLine.arguments.contains("--mod-preview") {
+            try? ModPlatform.shared.open("native-team", panel: "team")
+            NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
+            return
         }
         signal(SIGPIPE, SIG_IGN)            // запись в умерший Codex/Claude не должна ронять приложение
         if let url = Bundle.main.url(forResource: "PultAppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
@@ -30,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if chat.unread { chat.unread = false }
     }
     func applicationWillTerminate(_ n: Notification) {
+        ModPlatform.shared.stopAll()
         Workspace.shared.chats.forEach { $0.shutdown() }
         Proxy.shared.stop()
     }
@@ -63,6 +71,7 @@ struct PultApp: App {
         }
         .defaultSize(width: 1080, height: 800)
         .windowStyle(.hiddenTitleBar)
+        .commands { ModAppCommands() }
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Новый чат") { workspace.newChat() }.keyboardShortcut("n")

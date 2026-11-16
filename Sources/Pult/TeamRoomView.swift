@@ -101,12 +101,18 @@ struct TeamChatPanel: View {
                 Spacer()
                 Button("Настроить") { workspace.showTeamRoom = true }.font(.caption)
             }
+            Toggle("Агенты общаются автоматически", isOn: $model.agentDialogue).font(.caption)
+            HStack {
+                Text(model.agentStatus).font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button("Ещё 8 ходов") { model.resumeAgentDialogue() }.font(.caption).disabled(!model.agentDialogue)
+            }
             Divider()
             ScrollViewReader { scroll in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
-                        if model.messages.isEmpty { Text("Здесь договариваетесь с командой. Из любого сообщения можно создать задачу.").foregroundStyle(.secondary).padding(.vertical) }
-                        ForEach(model.messages) { message in
+                        if model.conversation.isEmpty { Text("Здесь договариваетесь с командой. Из любого сообщения можно создать задачу.").foregroundStyle(.secondary).padding(.vertical) }
+                        ForEach(model.conversation) { message in
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
                                     Text(message.author).font(.callout.bold())
@@ -119,7 +125,7 @@ struct TeamChatPanel: View {
                             }.padding(10).frame(maxWidth: .infinity, alignment: .leading).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10)).id(message.id)
                         }
                     }
-                }.onChange(of: model.messages.last?.id) { _, id in if let id = id { scroll.scrollTo(id, anchor: .bottom) } }
+                }.onChange(of: model.conversation.last?.id) { _, id in if let id = id { scroll.scrollTo(id, anchor: .bottom) } }
             }
             TextEditor(text: $model.draft).font(.callout).frame(height: 80).overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
             HStack {

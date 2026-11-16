@@ -16,7 +16,10 @@ sources=()
 for file in Sources/Pult/*.swift; do
   [[ "$file" == "Sources/Pult/App.swift" ]] || sources+=("$file")
 done
-for check in ModChecks ConversationChecks; do
+for check in ModChecks ConversationChecks ModSDKChecks; do
   xcrun swiftc -swift-version 5 -suppress-warnings -parse-as-library -module-cache-path .build/module-cache -F "$framework" -framework WebRTC -Xlinker -rpath -Xlinker "$framework" "${sources[@]}" "Checks/$check.swift" -o ".build/$check"
   ".build/$check"
 done
+
+xcrun swiftc -swift-version 5 -parse-as-library -module-cache-path .build/module-cache Sources/Pult/TeamBoard.swift Sources/Pult/TeamAgentRelay.swift Checks/TeamAgentChecks.swift -o .build/TeamAgentChecks
+.build/TeamAgentChecks
