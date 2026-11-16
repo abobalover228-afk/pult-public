@@ -52,15 +52,17 @@ struct TeamRoomView: View {
             }
             GroupBox("Код проекта · GitHub") {
                 VStack(alignment: .leading, spacing: 10) {
+                    Toggle("Создавать папки и скачивать проект автоматически", isOn: $model.automaticFolders).disabled(model.working)
+                    Text("Пульт подготовит копию проекта и отдельную папку с Git-веткой для каждой задачи. Доступ к приватному GitHub настраивается через Git на этом компьютере.").font(.caption).foregroundStyle(.secondary)
                     HStack {
                         TextField("https://github.com/команда/проект", text: $model.repository)
                         Button("Подключить к комнате") { model.connectRepository() }.disabled(!model.isHost || model.working)
                     }
                     HStack {
-                        Text(model.project.isEmpty ? "Локальная папка не выбрана" : model.project).font(.caption).textSelection(.enabled).lineLimit(2)
+                        Text(model.project.isEmpty ? "Пульт сам скачает проект при запуске задачи" : model.project).font(.caption).textSelection(.enabled).lineLimit(2)
                         Spacer()
                         Button("Папка проекта") { model.chooseProject() }.disabled(model.working)
-                        Button("Скачать из GitHub") { model.cloneProject() }.disabled(model.working || model.repository.isEmpty)
+                        Button("Скачать автоматически") { model.prepareProject() }.disabled(model.working || model.repository.isEmpty)
                     }
                     Button("Обновить проект из GitHub") { model.pullProject() }.disabled(model.project.isEmpty || model.working || !model.running.isEmpty || workspace.anyBusy)
                     SecureField("GitHub-токен для создания PR", text: $settings.githubToken)
@@ -173,7 +175,13 @@ struct TeamTasksPanel: View {
             } label: {
                 HStack { if model.pendingClaims || model.working { ProgressView().controlSize(.small) }; Text("Взять в работу · \(model.selected.count)"); Spacer(); Image(systemName: "play.fill") }
             }.buttonStyle(.borderedProminent).disabled(!model.canClaim || model.selected.isEmpty)
-            Text("Отдельный чат и Git-ветка на каждую задачу. Запуск расходует лимиты твоего аккаунта.").font(.caption2).foregroundStyle(.secondary)
+            if let reason = model.claimBlockReason {
+                Text(reason).font(.caption).foregroundStyle(.orange).textSelection(.enabled)
+                Button("Настроить команду и проект") { workspace.showTeamRoom = true }.font(.caption)
+            } else if model.selected.isEmpty {
+                Text("Отметь галочкой свободную задачу, затем нажми «Взять в работу»").font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Переписка с агентом личная. Чат команды, задачи, статусы и результаты видны всем. Отдельная Git-ветка на каждую задачу; расходуются твои лимиты.").font(.caption2).foregroundStyle(.secondary)
             Text(model.status).font(.caption2).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
         }.padding(14).frame(width: 320).background(panel.opacity(0.94))
         .sheet(item: $state.reviewTask) { task in

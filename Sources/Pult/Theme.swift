@@ -88,6 +88,7 @@ struct ToastView: View {
 // MARK: корень окна
 
 struct RootView: View {
+    @ObservedObject var mods = ModStore.shared
     @ObservedObject var workspace: Workspace
     @ObservedObject var updater = Updater.shared
 
@@ -893,10 +894,13 @@ struct PaletteView: View {
 final class SettingsForm: ObservableObject {
     @Published var token = ""
     @Published var remote = ""
-    @Published var tab = "work"
+    @Published var tab = UserDefaults.standard.string(forKey: "settingsTab") ?? "work" {
+        didSet { UserDefaults.standard.set(tab, forKey: "settingsTab") }
+    }
 }
 
 struct SettingsView: View {
+    @ObservedObject var mods = ModStore.shared
     @ObservedObject var wallpaper = PultWallpaper.shared
     @ObservedObject var chat: Chat
     @ObservedObject var proxy = Proxy.shared
@@ -910,7 +914,7 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             Picker("", selection: $form.tab) {
                 Text("Работа").tag("work"); Text("Telegram").tag("telegram"); Text("Обновления").tag("update")
-                Text("Голос").tag("voice"); Text("Сеть").tag("net"); Text("Вид").tag("look"); Text("Гайд").tag("guide")
+                Text("Голос").tag("voice"); Text("Сеть").tag("net"); Text("Вид").tag("look"); Text("Гайд").tag("guide"); Text("Моды").tag("mods")
             }.pickerStyle(.segmented).labelsHidden().padding([.horizontal, .top], 16)
             Form {
                 switch form.tab {
@@ -920,13 +924,22 @@ struct SettingsView: View {
                 case "net": networkSection
                 case "look": lookSection
                 case "guide": Section("Помощь") { Button("Открыть гайд") { close(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { Workspace.shared.showGuide = true } } }
+                case "mods": ModsSettingsView()
                 default: workSection
                 }
             }.formStyle(.grouped)
             HStack { Spacer(); Button("Готово", action: close).keyboardShortcut(.defaultAction) }.padding([.horizontal, .bottom], 16)
         }
-        .frame(width: 600, height: 560)
-        .onAppear { form.remote = updater.remote }
+        .frame(width: 720, height: 600)
+        .onAppear { form.remote = updater.remote; form.tab = UserDefaults.standard.string(forKey: "settingsTab") ?? "work" }
+        .sheet(isPresented: Binding(get: { mods.panelID != nil }, set: { if !$0 { mods.panelID = nil } })) {
+            if let mod = mods.mods.first(where: { $0.id == mods.panelID && mods.enabled.contains($0.id) }) {
+                VStack {
+                    HStack { Text(mod.panel?.title ?? mod.name).font(.headline); Spacer(); Button("Закрыть") { mods.panelID = nil } }.padding()
+                    ModPanel(mod: mod, settings: mods.settings(for: mod)).id(mod.id)
+                }.frame(width: 680, height: 500)
+            }
+        }
     }
 
     @ViewBuilder var workSection: some View {
@@ -1045,7 +1058,7 @@ struct SettingsView: View {
                 }
             }
         }
-        Section("Лента") {
+        Section("Лента · сохраняется для всех чатов") {
             Toggle("Показывать только сообщения (без команд и служебных блоков)", isOn: $chat.focusedConversation)
             Toggle("Разворачивать вывод команд целиком", isOn: $chat.expandedTools)
         }

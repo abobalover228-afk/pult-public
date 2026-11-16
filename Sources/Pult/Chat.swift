@@ -119,13 +119,21 @@ final class Chat: ObservableObject {
     var claudeAddDirs: [String] = []
     private var turnMarks: [(turn: String, count: Int)] = []      // для /undo: с какого элемента начался ход
     private var pendingMark = 0
-    @Published var claudePermissionMode = "auto"
+    @Published var claudePermissionMode = UserDefaults.standard.string(forKey: "claudePermissionMode") ?? "auto" {
+        didSet { UserDefaults.standard.set(claudePermissionMode, forKey: "claudePermissionMode") }
+    }
     @Published var claudeCommands: [PultCommand] = (UserDefaults.standard.stringArray(forKey: "claudeCommands") ?? []).map { PultCommand(name: $0, detail: "Навык установленного Claude Code") }
     @Published var pendingNativeAction: PendingNativeAction? = nil
     @Published var nativeCLIIsRunning = false
     var nativeCLIProcess: Process?
-    @Published var expandedTools = false
-    @Published var focusedConversation = false
+    var expandedTools: Bool {
+        get { preferences.expandedTools }
+        set { preferences.expandedTools = newValue }
+    }
+    var focusedConversation: Bool {
+        get { preferences.focusedConversation }
+        set { preferences.focusedConversation = newValue }
+    }
     @Published var claudeUsage = "Пока нет завершённых ходов."
     @Published var codexInputTokens: Int? = nil
     @Published var codexOutputTokens: Int? = nil
@@ -136,9 +144,13 @@ final class Chat: ObservableObject {
     @Published var cwd = UserDefaults.standard.string(forKey: "workingDirectory") ?? homeDir {
         didSet { UserDefaults.standard.set(cwd, forKey: "workingDirectory") }
     }
-    @Published var sandbox = "workspace-write"
+    @Published var sandbox = UserDefaults.standard.string(forKey: "sandbox") ?? "workspace-write" {
+        didSet { UserDefaults.standard.set(sandbox, forKey: "sandbox") }
+    }
     @Published var turnStarted: Date? = nil
-    @Published var notifyTelegram = true
+    @Published var notifyTelegram = UserDefaults.standard.object(forKey: "notifyTelegram") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(notifyTelegram, forKey: "notifyTelegram") }
+    }
     @Published var autoApprove = UserDefaults.standard.object(forKey: "autoApprove") as? Bool ?? false {
         didSet { UserDefaults.standard.set(autoApprove, forKey: "autoApprove") }
     }
@@ -160,7 +172,9 @@ final class Chat: ObservableObject {
     private var claudeFailed = false
     private var continuingAfterLimit = false
     private var interruptWanted = false
-    var autoSwitch = true
+    @Published var autoSwitch = UserDefaults.standard.object(forKey: "autoSwitch") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(autoSwitch, forKey: "autoSwitch") }
+    }
 
     var client: CodexClient?
     @Published private(set) var threadId: String?
@@ -451,6 +465,7 @@ final class Chat: ObservableObject {
 
     func send(_ text: String, echo: Bool = true) {
         var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ModStore.shared.handle(t, chat: self) { return }
         if handleFast(t) { return }
         if handleAPISlash(t) { return }
         if handleSlash(t) { return }

@@ -14,7 +14,21 @@ import SwiftUI
     prefs.togglePin("stable-thread");let reopened=ConversationPreferences(defaults:defaults)
     precondition(reopened.pins.contains("stable-thread") && reopened.rules("two")=="override")
     reopened.setOverride(nil,for:"one");precondition(reopened.rules("one")=="global")
+    prefs.focusedConversation = true; prefs.expandedTools = true
+    let reloaded = ConversationPreferences(defaults: defaults)
+    precondition(reloaded.focusedConversation && reloaded.expandedTools)
+    let shared = ConversationPreferences.shared
+    let previousFocused = shared.focusedConversation, previousExpanded = shared.expandedTools
+    defer { shared.focusedConversation = previousFocused; shared.expandedTools = previousExpanded }
+    shared.focusedConversation = false; shared.expandedTools = false
     let chat=Chat(connectImmediately:false);chat.connectBranches=false;chat.target="codex"
+    let other = Chat(connectImmediately:false)
+    chat.focusedConversation = true; chat.expandedTools = true
+    precondition(other.focusedConversation && other.expandedTools)
+    let expandedCommand = chat.add(.command, "keep expanded")
+    chat.busy = true; chat.busy = false
+    precondition(chat.expandedTools && !expandedCommand.serviceCollapsed)
+    chat.items.removeAll(); chat.expandedTools = false; chat.focusedConversation = false
     let cmd=chat.add(.command,"inspect");cmd.output=String(repeating:"x",count:20000);cmd.exitCode=0
     let error=chat.add(.command,"failure");error.exitCode=1
     let question=chat.add(.question,"unanswered")

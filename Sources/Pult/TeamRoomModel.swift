@@ -3,8 +3,13 @@ import SwiftUI
 
 final class TeamRoomModel: ObservableObject {
     static let shared = TeamRoomModel()
+    @Published var automaticFolders = UserDefaults.standard.object(forKey: "team.automaticFolders") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(automaticFolders, forKey: "team.automaticFolders") }
+    }
     @Published var project = UserDefaults.standard.string(forKey: "team.project") ?? ""
-    @Published var name = UserDefaults.standard.string(forKey: "team.name") ?? ""
+    @Published var name = UserDefaults.standard.string(forKey: "team.name") ?? NSFullUserName() {
+        didSet { UserDefaults.standard.set(name, forKey: "team.name") }
+    }
     @Published var server = UserDefaults.standard.string(forKey: "team.rendezvous") ?? (Bundle.main.object(forInfoDictionaryKey: "PultRendezvousURL") as? String ?? "")
     @Published var code = ""
     @Published var invitation = ""
@@ -34,7 +39,16 @@ final class TeamRoomModel: ObservableObject {
     var isHost: Bool { room?.id == room?.invitation.coordinator && room != nil }
     var identity: String { room?.id ?? "" }
     var hasSavedRoom: Bool { Secrets.read("PULT_TEAM_INVITATION") != nil }
-    var canClaim: Bool { connected && boardReady && !pendingClaims && !working && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !project.isEmpty && !board.repository.isEmpty }
+    var claimBlockReason: String? {
+        if !connected { return "Сначала войди в комнату команды" }
+        if !boardReady { return "Нет подтверждения доски от создателя комнаты. Он должен оставаться на связи" }
+        if pendingClaims { return "Ждём подтверждения назначения от создателя комнаты" }
+        if working { return "Дождись завершения подготовки проекта" }
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Укажи своё имя в настройках команды" }
+        if board.repository.isEmpty { return "Создатель комнаты должен подключить GitHub-репозиторий" }
+        return nil
+    }
+    var canClaim: Bool { claimBlockReason == nil }
     private var cacheURL: URL? {
         guard let room = room else { return nil }
         return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Pult/Rooms/" + room.invitation.room + ".json")
@@ -44,7 +58,7 @@ final class TeamRoomModel: ObservableObject {
         let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true
         panel.message = "Выбери корень локального Git-репозитория"
         if panel.runModal() == .OK, let url = panel.url {
-            project = url.path; UserDefaults.standard.set(project, forKey: "team.project")
+            automaticFolders = false; project = url.path; UserDefaults.standard.set(project, forKey: "team.project")
             queue.async {
                 let remote = try? ProjectGit.run(["remote", "get-url", "origin"], at: url).text
                 DispatchQueue.main.async { if let remote = remote, TeamRepository.slug(remote) != nil { self.repository = remote } }
@@ -201,13 +215,11 @@ final class TeamRoomModel: ObservableObject {
         guard TeamRepository.slug(repository) != nil else { status = "Вставь HTTPS-адрес репозитория GitHub"; return }
         request(BoardRequest(action: "repository", repository: repository)) { _ in self.status = "Репозиторий подключён: " + self.board.repository }
     }
-    func cloneProject() {
-        let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true
-        panel.message = "В какую папку скачать репозиторий?"
-        guard panel.runModal() == .OK, let parent = panel.url else { return }
+    func prepareProject() {
+        automaticFolders = true
         let repo = board.repository.isEmpty ? repository : board.repository
-        work("Скачиваю репозиторий…") { try TeamProject.clone(repo, into: parent).path } done: {
-            self.project = $0; UserDefaults.standard.set($0, forKey: "team.project"); self.status = "Проект скачан"
+        work("Создаю папки и скачиваю репозиторий…") { try TeamProject.automaticProject(repo).path } done: {
+            self.project = $0; UserDefaults.standard.set($0, forKey: "team.project"); self.status = "Проект готов. Отметь задачу и нажми «Взять в работу»"
         }
     }
     func pullProject() {
@@ -241,8 +253,28 @@ final class TeamRoomModel: ObservableObject {
         guard let room = room, !working else { return }
         let own = tasks.filter { $0.ownerID == identity && !running.values.contains($0.id) && $0.status != .done }
         guard !own.isEmpty else { return }
-        working = true; let token = generation, repo = board.repository, folder = URL(fileURLWithPath: project), roomID = room.invitation.room
+        working = true; status = "Готовлю папки и репозиторий…"
+        let token = generation, repo = board.repository, preferred = automaticFolders ? "" : project, roomID = room.invitation.room
         queue.async {
+            let folder: URL
+            do {
+                folder = try TeamProject.automaticProject(repo, preferred: preferred)
+                DispatchQueue.main.async {
+                    guard self.generation == token else { return }
+                    self.project = folder.path; UserDefaults.standard.set(folder.path, forKey: "team.project")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard self.generation == token else { return }
+                    self.working = false
+                    self.status = "Не удалось подготовить проект: " + error.localizedDescription
+                    for task in own {
+                        var failed = task; failed.status = .failed; failed.result = String(self.status.prefix(2000))
+                        self.request(BoardRequest(action: "update", task: failed))
+                    }
+                }
+                return
+            }
             for task in own {
                 do {
                     let path = try TeamProject.prepare(task, folder: folder, repository: repo, room: roomID)

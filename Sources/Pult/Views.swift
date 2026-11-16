@@ -4,8 +4,8 @@ import SwiftUI
 
 let mono = Font.system(size: 13, design: .monospaced)
 let monoSmall = Font.system(size: 11.5, design: .monospaced)
-let accent = Color(red: 0.85, green: 0.47, blue: 0.34)        // «клодовский» оранжевый
-let bg = Color(red: 0.09, green: 0.09, blue: 0.10)
+var accent: Color { ModStore.shared.theme.flatMap { Color.modHex($0.accent) } ?? Color(red: 0.85, green: 0.47, blue: 0.34) }        // «клодовский» оранжевый
+var bg: Color { ModStore.shared.theme?.background.flatMap { Color.modHex($0) } ?? Color(red: 0.09, green: 0.09, blue: 0.10) }
 let widgetDir = helperDir
 
 func md(_ s: String) -> AttributedString {

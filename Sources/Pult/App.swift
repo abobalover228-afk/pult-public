@@ -5,9 +5,9 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         if CommandLine.arguments.contains("--smoke-test") {
-            guard Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == "2.2.0",
+            guard Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == "2.3.0",
                   Bundle.main.url(forResource: "PultAppIcon", withExtension: "icns") != nil else { exit(1) }
-            print("PASS: Pult 2.2 app launch, linked WebRTC and bundle resources")
+            print("PASS: Pult 2.3 app launch, linked WebRTC and bundle resources")
             exit(0)
         }
         signal(SIGPIPE, SIG_IGN)            // запись в умерший Codex/Claude не должна ронять приложение
@@ -39,12 +39,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct PultApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject var workspace = Workspace.shared
+    @StateObject var workspace = CommandLine.arguments.contains("--smoke-test") ? Workspace(connectImmediately: false) : Workspace.shared
 
     var body: some Scene {
         WindowGroup("Пульт") {
             RootView(workspace: workspace).frame(minWidth: 760, minHeight: 520)
                 .onOpenURL { url in
+                    if url.isFileURL, url.pathExtension.lowercased() == "pult" {
+                        ModStore.shared.install(url)
+                        return
+                    }
                     if url.host == "room" {
                         TeamRoomModel.shared.code = url.absoluteString
                         workspace.showTeamRoom = true

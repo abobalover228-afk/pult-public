@@ -10,11 +10,26 @@ enum TeamProject {
         guard TeamRepository.slug(remote)?.lowercased() == slug.lowercased() else { throw TeamRoomError("Origin этой папки отличается от репозитория команды") }
     }
 
-    static func clone(_ repository: String, into parent: URL) throws -> URL {
-        guard let slug = TeamRepository.slug(repository) else { throw TeamRoomError("Неверный адрес GitHub") }
-        let destination = parent.appendingPathComponent(String(slug.split(separator: "/").last!))
-        guard !FileManager.default.fileExists(atPath: destination.path) else { throw TeamRoomError("Папка уже существует. Выбери её кнопкой «Папка проекта»") }
-        try ProjectGit.run(["clone", "--", "https://github.com/" + slug + ".git", destination.path], at: parent)
+    static func automaticProject(_ repository: String, preferred: String = "", root: URL? = nil) throws -> URL {
+        guard let slug = TeamRepository.slug(repository) else { throw TeamRoomError("Подключи репозиторий GitHub к комнате") }
+        if !preferred.isEmpty {
+            let folder = URL(fileURLWithPath: preferred, isDirectory: true)
+            try verify(folder, repository: repository)
+            return folder
+        }
+        let base = root ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Pult/Projects")
+        let destination = base.appendingPathComponent(slug.lowercased(), isDirectory: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try verify(destination, repository: repository)
+            return destination
+        }
+        let parent = destination.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let stage = parent.appendingPathComponent(".pult-clone-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: stage) }
+        try ProjectGit.run(["clone", "--", "https://github.com/" + slug + ".git", stage.path], at: parent)
+        try verify(stage, repository: repository)
+        try FileManager.default.moveItem(at: stage, to: destination)
         return destination
     }
 

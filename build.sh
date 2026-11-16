@@ -13,6 +13,8 @@ cp Bundle/Info.plist "$APP/Contents/Info.plist"
 cp -f Bundle/*.icns Bundle/WebRTC-LICENSE.md "$APP/Contents/Resources/"
 cp Resources/helpers/*.py Resources/helpers/*.sh "$APP/Contents/Resources/helpers/"
 FRAMEWORK=".build/artifacts/webrtc/WebRTC/WebRTC.xcframework/macos-x86_64_arm64/WebRTC.framework"
+mkdir -p "$APP/Contents/Resources/Mods"
+cp -f Examples/*.pult MODDING.md "$APP/Contents/Resources/Mods/"
 ditto "$FRAMEWORK" "$APP/Contents/Frameworks/WebRTC.framework"
 cp "$BIN_DIR/Pult" "$APP/Contents/MacOS/Pult"
 install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/Pult"
@@ -34,9 +36,9 @@ make_app() {
 <key>CFBundleIdentifier</key><string>$identifier</string>
 <key>CFBundleExecutable</key><string>$executable</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>2.2.0</string>
+<key>CFBundleShortVersionString</key><string>2.3.0</string>
 <key>CFBundleIconFile</key><string>${executable}AppIcon.icns</string>
-<key>CFBundleVersion</key><string>2.2.0</string>
+<key>CFBundleVersion</key><string>2.3.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><$accessory/>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>pultpublic</string><key>CFBundleURLSchemes</key><array><string>pultpublic</string></array></dict></array>

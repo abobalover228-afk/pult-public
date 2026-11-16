@@ -134,7 +134,7 @@ extension Chat {
         if isAPI { return [PultCommand(name: "fast", detail: "Fast: недоступен для произвольного API"), PultCommand(name: "help", detail: "Возможности API"), PultCommand(name: "new", detail: "Новый диалог"), PultCommand(name: "stop", detail: "Остановить запрос"), PultCommand(name: "usage", detail: "Лимиты неизвестны")] }
         var seen = Set<String>()
         let dynamic = target == "claude" ? claudeCommands : []
-        return (PultCommand.list(for: target) + dynamic).filter { seen.insert($0.name).inserted }.sorted { $0.name < $1.name }
+        return (PultCommand.list(for: target) + dynamic + ModStore.shared.commandList).filter { seen.insert($0.name).inserted }.sorted { $0.name < $1.name }
     }
     func matchingCommands(_ input: String) -> [PultCommand] {
         guard input.hasPrefix("/"), !input.contains(where: { $0.isWhitespace }) else { return [] }

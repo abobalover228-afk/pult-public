@@ -1,0 +1,24 @@
+{
+  "format": 1,
+  "id": "starter",
+  "name": "Стартовый мод",
+  "version": "1.0.0",
+  "author": "Pult",
+  "description": "Фиолетовая тема, команда объяснения и панель заметок",
+  "permissions": [],
+  "theme": {
+    "accent": "#B99AFF",
+    "background": "#171220"
+  },
+  "commands": [
+    {
+      "name": "explain",
+      "title": "Объяснить выбранную тему",
+      "prompt": "Объясни простыми словами и приведи пример: {{input}}"
+    }
+  ],
+  "panel": {
+    "title": "Заметки",
+    "html": "<!doctype html><meta charset=\"utf-8\"><style>body{background:#171220;color:#eee;font:16px system-ui;padding:20px}textarea{width:95%;height:260px;background:#241d33;color:#eee;border:1px solid #b99aff;border-radius:10px;padding:12px}</style><h2>Блокнот мода</h2><p>Данные этой панели живут до её закрытия.</p><textarea placeholder=\"Запиши мысль…\"></textarea>"
+  }
+}

@@ -3,12 +3,16 @@ import SwiftUI
 
 final class ConversationPreferences: ObservableObject {
     static let shared = ConversationPreferences()
+    @Published var focusedConversation: Bool { didSet { defaults.set(focusedConversation, forKey: "focusedConversation") } }
+    @Published var expandedTools: Bool { didSet { defaults.set(expandedTools, forKey: "expandedTools") } }
     @Published var globalRules: String { didSet { defaults.set(globalRules, forKey: "globalRules.v2") } }
     @Published private(set) var overrides: [String:String]
     @Published private(set) var pins: Set<String>
     private let defaults: UserDefaults
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        focusedConversation = defaults.bool(forKey: "focusedConversation")
+        expandedTools = defaults.bool(forKey: "expandedTools")
         globalRules = defaults.string(forKey: "globalRules.v2") ?? ""
         overrides = defaults.dictionary(forKey: "chatRules.v2") as? [String:String] ?? [:]
         pins = Set(defaults.stringArray(forKey: "pinnedThreads.v2") ?? [])
@@ -81,7 +85,7 @@ extension Chat {
 
     func migrateRules(from old:String) { preferences.copyOverride(from:old,to:conversationKey) }
     func collapseServiceBlocks() {
-        expandedTools = false
+        guard !expandedTools else { return }
         for item in items where item.canCollapse { item.serviceCollapsed=true;item.expanded=false }
     }
     func saveLocalBranch() {

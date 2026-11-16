@@ -6,6 +6,7 @@ struct PultCommand: Identifiable {
     let detail: String
     var id: String { name }
     static let common: [PultCommand] = [
+        .init(name: "mods", detail: "Установленные моды .pult"),
         .init(name: "help", detail: "Список команд"),
         .init(name: "fast", detail: "Быстрый режим: /fast [on|off|status]"),
         .init(name: "new", detail: "Новый разговор"),
