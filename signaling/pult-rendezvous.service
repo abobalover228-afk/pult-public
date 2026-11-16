@@ -1,0 +1,26 @@
+[Unit]
+Description=Pult peer rendezvous (no chat relay)
+After=network.target caddy.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+User=pult-rendezvous
+ExecStart=/usr/bin/python3 /opt/pult-rendezvous/server.py
+ExecStartPost=/usr/bin/python3 /opt/pult-rendezvous/route.py
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/opt/pult-rendezvous/.env
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=128M
+CPUQuota=20%
+TasksMax=80
+
+[Install]
+WantedBy=multi-user.target

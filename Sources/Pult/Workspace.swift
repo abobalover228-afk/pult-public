@@ -137,6 +137,9 @@ final class Workspace: ObservableObject {
     @Published var toast: String?
     @Published var showGuide = false
     @Published var showPalette = false
+    @Published var showTeamRoom = false
+    @Published var showTeamTasks = false
+    @Published var showTeamChat = false
     @Published var search = ""
     @Published var sidebar = UserDefaults.standard.object(forKey: "sidebar") as? Bool ?? true {
         didSet { UserDefaults.standard.set(sidebar, forKey: "sidebar") }
@@ -148,8 +151,8 @@ final class Workspace: ObservableObject {
     /// Сколько чатов ждут человека — для значка в Dock.
     var waiting: Int { chats.filter { $0.status.needsYou }.count }
 
-    init() {
-        let first = Chat()
+    init(connectImmediately: Bool = true) {
+        let first = Chat(connectImmediately: connectImmediately)
         attach(first)
         chats = [first]; activeID = first.sessionID
     }
@@ -164,6 +167,7 @@ final class Workspace: ObservableObject {
     private var lastBadge = -1
     private var lastSignature = ""
     private func chatChanged() {
+        for chat in chats { TeamRoomModel.shared.refreshAgent(chat) }
         let signature = chats.map { "\($0.sessionID.uuidString.prefix(4))\($0.status)\($0.title.prefix(20))" }.joined()
         if signature != lastSignature { lastSignature = signature; objectWillChange.send() }
         let count = waiting
@@ -230,6 +234,7 @@ final class Workspace: ObservableObject {
     // MARK: события чатов → уведомления
 
     private func handle(_ chat: Chat, _ event: ChatEvent) {
+        TeamRoomModel.shared.agentEvent(chat, event)
         let appActive = NSApp?.isActive ?? true
         let visible = appActive && chat.sessionID == activeID
         switch event {

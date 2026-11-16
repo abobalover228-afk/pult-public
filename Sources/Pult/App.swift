@@ -4,16 +4,22 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
+        if CommandLine.arguments.contains("--smoke-test") {
+            guard Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == "2.2.0",
+                  Bundle.main.url(forResource: "PultAppIcon", withExtension: "icns") != nil else { exit(1) }
+            print("PASS: Pult 2.2 app launch, linked WebRTC and bundle resources")
+            exit(0)
+        }
         signal(SIGPIPE, SIG_IGN)            // запись в умерший Codex/Claude не должна ронять приложение
         if let url = Bundle.main.url(forResource: "PultAppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
             NSApp.applicationIconImage = icon
         }
-        try? FileManager.default.createDirectory(atPath: appDataDir, withIntermediateDirectories: true)
         Proxy.shared.apply()
         Proxy.shared.onChange = {
             Workspace.shared.networkChanged()
             TelegramBridge.shared.restart()
         }
+        BotStatus.shared.startWatching()
         TelegramBridge.shared.start()
         Updater.shared.start()
         NSApp.setActivationPolicy(.regular)
@@ -39,6 +45,11 @@ struct PultApp: App {
         WindowGroup("Пульт") {
             RootView(workspace: workspace).frame(minWidth: 760, minHeight: 520)
                 .onOpenURL { url in
+                    if url.host == "room" {
+                        TeamRoomModel.shared.code = url.absoluteString
+                        workspace.showTeamRoom = true
+                        return
+                    }
                     let chat = workspace.active
                     guard !chat.busy, !chat.nativeCLIIsRunning else { return }
                     if url.host == "connections" { chat.showAPIConnections = true }
@@ -60,9 +71,6 @@ struct PultApp: App {
                 ForEach(0..<9, id: \.self) { i in
                     Button("Чат \(i + 1)") { workspace.activate(index: i) }.keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
                 }
-            }
-            CommandGroup(replacing: .help) {
-                Button("Гайд по Пульту") { workspace.showGuide = true }.keyboardShortcut("?", modifiers: .command)
             }
             CommandGroup(after: .pasteboard) {
                 Button("Вставить файл / картинку") { pasteImage(workspace.active) }.keyboardShortcut("v", modifiers: [.command, .shift])

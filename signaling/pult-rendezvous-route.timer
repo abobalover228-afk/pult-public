@@ -1,0 +1,10 @@
+[Unit]
+Description=Maintain Pult rendezvous route after proxy reload
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=pult-rendezvous-route.service
+
+[Install]
+WantedBy=timers.target

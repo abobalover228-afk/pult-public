@@ -189,6 +189,7 @@ final class Chat: ObservableObject {
     /// Диалоги всех аккаунтов (у одного диалога может быть копия в нескольких — берём свежую).
     func loadThreads() {
         let accs = accounts
+        let hidden = ChatTrash.shared.ids
         DispatchQueue.global(qos: .userInitiated).async {
             let fm = FileManager.default
             var best: [String: (path: String, date: Date, account: String)] = [:]
@@ -203,7 +204,7 @@ final class Chat: ObservableObject {
                     if best[tid] == nil || m > best[tid]!.date { best[tid] = (path, m, a.name) }
                 }
             }
-            let ordered = best.sorted { $0.value.date > $1.value.date }
+            let ordered = best.filter { !hidden.contains($0.key) }.sorted { $0.value.date > $1.value.date }
             let pinned = self.preferences.pins
             let selected = ordered.filter { pinned.contains($0.key) } + ordered.filter { !pinned.contains($0.key) }.prefix(200)
             let list = selected.map { tid, v -> ThreadInfo in
@@ -211,7 +212,7 @@ final class Chat: ObservableObject {
                 return ThreadInfo(id: tid, path: v.path, title: title, date: v.date, account: v.account, cwd: cwd)
             }
             let apiThreads = APIHistory.threads()
-            DispatchQueue.main.async { self.threads = (Array(list) + apiThreads + LocalConversationStore.threads()).sorted { $0.date > $1.date } }
+            DispatchQueue.main.async { self.threads = (Array(list) + apiThreads + LocalConversationStore.threads()).filter { !ChatTrash.shared.ids.contains($0.id) }.sorted { $0.date > $1.date } }
         }
     }
 
@@ -315,7 +316,7 @@ final class Chat: ObservableObject {
         } else { autotest() }
     }
 
-    /// PULT_AUTOTEST="текст": отправить и записать диалог в ~/Library/Application Support/PultPublic/autotest.log (самопроверка).
+    /// PULT_AUTOTEST="текст": отправить и записать диалог в ~/Documents/pult/autotest.log (самопроверка).
     private func autotest() {
         guard isPrimary else { return }
         if ProcessInfo.processInfo.environment["PULT_AUTOOPEN"] == "1" {      // открыть последний диалог
@@ -1318,7 +1319,7 @@ extension Chat {
             else { add(.user, argument); send(multiAgentPrompt + argument, echo: false) }
         case "rules": showRules = true
         case "telegram", "vless": showCommandSettings = true
-        case "bot": add(.note, "Настрой своего Telegram-бота: настройки → Telegram.")
+        case "bot": ui.showBot = true
         case "update":
             Updater.shared.check(manual: true)
             add(.note, "Проверяю обновления… Результат — в настройках и в боковой панели.")

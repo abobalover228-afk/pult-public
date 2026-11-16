@@ -4,29 +4,33 @@ import AppKit
 import Foundation
 
 enum Secrets {
-    private static var file: URL { URL(fileURLWithPath: appDataDir + "/.env") }
+    private static var file: URL {
+        let source = Bundle.main.object(forInfoDictionaryKey: "PultSource") as? String
+        return URL(fileURLWithPath: (source ?? appDataDir) + "/.env")
+    }
+    private static func key(_ name: String) -> String {
+        name == "telegram-bot-token" ? "TELEGRAM_BOT_TOKEN" : name
+    }
     static func read(_ name: String) -> String? {
+        let prefix = key(name) + "="
         guard let text = try? String(contentsOf: file, encoding: .utf8),
-              let line = text.components(separatedBy: .newlines).first(where: { $0.hasPrefix("TELEGRAM_BOT_TOKEN=") }) else { return nil }
-        let value = String(line.dropFirst("TELEGRAM_BOT_TOKEN=".count))
+              let line = text.components(separatedBy: .newlines).first(where: { $0.hasPrefix(prefix) }) else { return nil }
+        let value = String(line.dropFirst(prefix.count))
         return (try? JSONDecoder().decode(String.self, from: Data(value.utf8))) ?? value
     }
     @discardableResult static func write(_ name: String, _ value: String?) -> Bool {
+        let prefix = key(name) + "="
+        guard key(name).range(of: #"^[A-Z][A-Z0-9_]*$"#, options: .regularExpression) != nil else { return false }
         do {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
             let old = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
-            var lines = old.components(separatedBy: .newlines).filter { !$0.hasPrefix("TELEGRAM_BOT_TOKEN=") && !$0.isEmpty }
+            var lines = old.components(separatedBy: .newlines).filter { !$0.hasPrefix(prefix) && !$0.isEmpty }
             if let value = value, !value.isEmpty {
                 let encoded = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
-                lines.append("TELEGRAM_BOT_TOKEN=" + encoded)
+                lines.append(prefix + encoded)
             }
-            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let data = Data((lines.joined(separator: "\n") + "\n").utf8)
-            if !FileManager.default.fileExists(atPath: file.path) {
-                guard FileManager.default.createFile(atPath: file.path, contents: data, attributes: [.posixPermissions: 0o600]) else { return false }
-            } else {
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-                try data.write(to: file)
-            }
+            try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
             return true
         } catch { return false }
     }
@@ -350,6 +354,8 @@ final class TelegramBridge: ObservableObject {
         if configured && paired {
             guard bound || notifyAlways || took > 60 else { return }
             send(head + "\n\n" + body, buttons: workspace.chats.count > 1 ? [[("Писать в этот чат", "sel:" + chat.sessionID.uuidString)]] : [])
+        } else if chat.notifyTelegram, took > 60 {             // прежний способ — общий бот на сервере
+            Remote.run("python3 /usr/local/lib/coder-chat/notify_owner.py", stdin: htmlEscape(head + "\n\n" + String(body.prefix(600)))) { _ in }
         }
     }
 

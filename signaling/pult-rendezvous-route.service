@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep Pult rendezvous route registered in Caddy
+After=caddy.service
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+User=pult-rendezvous
+ExecStart=/usr/bin/python3 /opt/pult-rendezvous/route.py
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes

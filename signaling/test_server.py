@@ -1,0 +1,79 @@
+import base64
+import json
+import threading
+import secrets
+import unittest
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+from server import create_server
+
+
+class SignalingChecks(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = create_server(port=0)
+        cls.url = "http://127.0.0.1:" + str(cls.server.server_address[1])
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def request(self, path, body=None, room=None, peer="A" * 24, token=None):
+        headers = {}
+        if room:
+            headers = {"Authorization": "Bearer " + (token or room["access"]), "X-Pult-Peer": peer}
+            path = "/v1/rooms/" + room["room"] + "/" + path
+        request = Request(self.url + path, data=json.dumps(body).encode() if body is not None else None,
+                          headers=headers)
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            with error:
+                return error.code, json.load(error)
+
+    def test_negotiation_only_and_auth(self):
+        status, room = self.request("/v1/rooms", {})
+        self.assertEqual(status, 201)
+        self.assertEqual(self.request("join", {}, room=room, token="wrong")[0], 403)
+        self.assertEqual(self.request("join", {}, room=room)[0], 200)
+        status, joined = self.request("join", {}, room=room, peer="B" * 24)
+        self.assertEqual(joined["peers"], ["A" * 24])
+        opaque = base64.b64encode(b"opaque-encrypted-sdp").decode()
+        self.assertEqual(self.request("signal", {"recipient": "B" * 24, "box": opaque}, room=room)[0], 200)
+        status, events = self.request("events?after=" + str(joined["cursor"]), room=room, peer="B" * 24)
+        self.assertEqual(events["events"][0]["box"], opaque)
+        self.assertEqual(self.request("messages", {"text": "PRIVATE CHAT"}, room=room)[0], 404)
+        self.assertEqual(self.request("signal", {"recipient": "B" * 24, "text": "PRIVATE CHAT"}, room=room)[0], 400)
+        self.assertEqual(self.request("join", {"text": "PRIVATE CHAT"}, room=room)[0], 409)
+        self.assertEqual(self.request("leave", {}, room=room)[0], 200)
+        self.assertEqual(self.request("signal", {"recipient": "B" * 24, "box": opaque}, room=room)[0], 410)
+
+    def test_owner_only_creation(self):
+        token = secrets.token_urlsafe(32)
+        server = create_server(port=0, create_token=token)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = "http://127.0.0.1:" + str(server.server_address[1]) + "/v1/rooms"
+        try:
+            with self.assertRaises(HTTPError) as error:
+                urlopen(Request(url, data=b"{}"), timeout=3)
+            self.assertEqual(error.exception.code, 403)
+            error.exception.close()
+            with urlopen(Request(url, data=b"{}", headers={"X-Pult-Create-Token": token}), timeout=3) as response:
+                self.assertEqual(response.status, 201)
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_limits_and_membership(self):
+        _, room = self.request("/v1/rooms", {})
+        for number in range(8):
+            self.assertEqual(self.request("join", {}, room=room, peer=str(number) * 24)[0], 200)
+        self.assertEqual(self.request("join", {}, room=room, peer="Z" * 24)[0], 409)
+        self.assertEqual(self.request("join", {}, room=room, peer="bad")[0], 400)
+        self.assertEqual(self.request("signal", {"recipient": "1" * 24, "box": "x" * 48_001}, room=room, peer="0" * 24)[0], 400)
+
+
+if __name__ == "__main__":
+    unittest.main()

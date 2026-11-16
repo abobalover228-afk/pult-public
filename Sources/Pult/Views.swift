@@ -278,6 +278,103 @@ struct ProviderIcon: View {
     }
 }
 
+struct BotView: View {
+    @ObservedObject var bot = BotStatus.shared
+    let close: () -> Void
+
+    func row(_ r: JSON) -> some View {
+        let p = (r["pnl_pct"] as? NSNumber)?.doubleValue ?? 0
+        return HStack {
+            Text((r["at"] as? String) ?? "").foregroundColor(.secondary)
+            Text("#\((r["id"] as? NSNumber)?.intValue ?? 0)")
+            Text((r["mint"] as? String) ?? "").foregroundColor(.secondary)
+            Text((r["reason"] as? String) ?? "")
+            Spacer()
+            Text(String(format: "%+.1f%%", p)).foregroundColor(p >= 0 ? .green : .red)
+        }.font(monoSmall)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Торговый бот").font(.title3.bold())
+                Spacer()
+                if bot.loading { ProgressView().scaleEffect(0.6) }
+                Button("Обновить") { bot.refresh() }
+                Button("Закрыть", action: close).keyboardShortcut(.cancelAction)
+            }
+            if let e = bot.error { Text(e).foregroundColor(.red) }
+            if let d = bot.data {
+                let today = (d["today"] as? JSON) ?? [:]
+                let pnl = (today["pnl_sol"] as? NSNumber)?.doubleValue ?? 0
+                let day = (d["day"] as? JSON) ?? [:]
+                HStack(spacing: 18) {
+                    Label((d["service"] as? String) == "active" ? "работает" : "НЕ работает", systemImage: "circle.fill")
+                        .foregroundColor((d["service"] as? String) == "active" ? .green : .red)
+                    Text("режим \((d["mode"] as? String) ?? "?")")
+                    Text("рестартов \((d["restarts"] as? String) ?? "?")").foregroundColor(.secondary)
+                }
+                HStack(spacing: 18) {
+                    VStack(alignment: .leading) {
+                        Text("Сегодня").foregroundColor(.secondary)
+                        Text(String(format: "%+.4f SOL", pnl)).font(.title2.bold()).foregroundColor(pnl >= 0 ? .green : .red)
+                    }
+                    VStack(alignment: .leading) {
+                        Text("Закрыто").foregroundColor(.secondary)
+                        Text("\((today["closed"] as? NSNumber)?.intValue ?? 0) · в плюс \((today["wins"] as? NSNumber)?.intValue ?? 0)").font(.title3)
+                    }
+                    VStack(alignment: .leading) {
+                        Text("За сутки").foregroundColor(.secondary)
+                        Text("входов \((day["copied"] as? NSNumber)?.intValue ?? 0) · рой отсёк \((day["swarm_skipped"] as? NSNumber)?.intValue ?? 0)")
+                    }
+                }
+                let open = (d["open"] as? [JSON]) ?? []
+                Text("Открытые позиции: \(open.count)").bold()
+                ForEach(Array(open.enumerated()), id: \.offset) { _, o in
+                    HStack {
+                        Text("#\((o["id"] as? NSNumber)?.intValue ?? 0) \((o["mint"] as? String) ?? "")")
+                        Text("\((o["age_min"] as? NSNumber)?.intValue ?? 0) мин").foregroundColor(.secondary)
+                        Spacer()
+                        if let p = (o["pnl_pct"] as? NSNumber)?.doubleValue {
+                            Text(String(format: "%+.1f%%", p)).foregroundColor(p >= 0 ? .green : .red)
+                        }
+                    }.font(monoSmall)
+                }
+                Text("Последние сделки").bold()
+                ForEach(Array(((d["last"] as? [JSON]) ?? []).enumerated()), id: \.offset) { _, r in row(r) }
+            } else if !bot.loading && bot.error == nil {
+                Text("Загружаю…").foregroundColor(.secondary)
+            }
+            Divider()
+            HStack {
+                Text("Программист и выкладка").bold()
+                Spacer()
+                if bot.deployActive { ProgressView().scaleEffect(0.5) }
+                Button(bot.changes.isEmpty ? "Нечего выкладывать" : "🚀 Выложить (\(bot.changes.count))") { bot.startDeploy() }
+                    .disabled(bot.changes.isEmpty || bot.workerBusy || bot.deployActive)
+                    .help("Тесты → бэкап кода и базы → сборка → рестарт → проверка; при сбое автоматический откат")
+            }
+            if bot.workerBusy { Text("Программист сейчас работает — выкладка после него.").font(.caption).foregroundColor(.orange) }
+            if !bot.changes.isEmpty { Text(bot.changes.joined(separator: "  ")).font(monoSmall).foregroundColor(.secondary).lineLimit(2) }
+            if !bot.deployLines.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(bot.deployLines.enumerated()), id: \.offset) { _, l in
+                            Text(l.hasPrefix("STEP ") ? "▸ " + l.dropFirst(5) : l.hasPrefix("OK ") ? "   ✓ " + l.dropFirst(3) : l.hasPrefix("FAIL ") ? "   ✗ " + l.dropFirst(5) : l)
+                                .font(monoSmall).foregroundColor(l.hasPrefix("FAIL") ? .red : l.hasPrefix("RESULT deployed") ? .green : .secondary)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(maxHeight: 130)
+            }
+            Spacer()
+            Text("Состояние — только чтение. Выкладка — тем же сценарием, что кнопка в Telegram.").font(.caption).foregroundColor(.secondary)
+        }
+        .padding(20)
+        .frame(width: 600, height: 680)
+        .onAppear { bot.refresh(); bot.refreshChanges(); bot.alarm = false }
+    }
+}
+
 let multiAgentPrompt = """
 Работай как главный мультиагентной команды. Раздели задачу на независимые части и запусти на них субагентов параллельно \
 (Codex: spawn_agent, затем wait_agent; Claude: инструмент Agent, несколько вызовов в одном сообщении). \

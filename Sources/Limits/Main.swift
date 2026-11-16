@@ -99,7 +99,7 @@ func readAPIConnections() -> [WidgetAPIConnection] {
     return (try? JSONDecoder().decode([WidgetAPIConnection].self, from: data)) ?? []
 }
 func openAPIManager(_ id: UUID? = nil) {
-    let value = id.map { "pultpublic://api?id=" + $0.uuidString } ?? "pultpublic://connections"
+    let value = id.map { "pult://api?id=" + $0.uuidString } ?? "pult://connections"
     NSWorkspace.shared.open(URL(string: value)!)
 }
 

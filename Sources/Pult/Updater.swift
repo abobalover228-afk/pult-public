@@ -1,141 +1,176 @@
-// Автообновление: Пульт следит за своим репозиторием на GitHub, подтягивает новые коммиты,
-// пересобирается из исходников и перезапускается. Сборка локальная — подпись и права не слетают.
 import AppKit
-import Foundation
+import CryptoKit
 
 final class Updater: ObservableObject {
     static let shared = Updater()
-    @Published var available = 0                    // сколько новых коммитов на GitHub
+    static let official = "https://github.com/abobalover228-afk/pult-public"
+    @Published var available = 0
     @Published var notes: [String] = []
     @Published var status = ""
     @Published var working = false
-    @Published var remote = ""
-    @Published var auto = UserDefaults.standard.object(forKey: "updateAuto") as? Bool ?? false {
+    @Published var remote = UserDefaults.standard.string(forKey: "updateRepo") ?? official
+    @Published var auto = UserDefaults.standard.object(forKey: "updateAuto") as? Bool ?? true {
         didSet { UserDefaults.standard.set(auto, forKey: "updateAuto") }
     }
-    private var timer: Timer?
-
-    @Published var source: String = UserDefaults.standard.string(forKey: "updateSource") ?? (Bundle.main.object(forInfoDictionaryKey: "PultSource") as? String) ?? homeDir + "/Documents/pult-public"
-    func setSource(_ path: String) {
-        guard !working else { return }
-        guard FileManager.default.fileExists(atPath: path + "/.git"), FileManager.default.fileExists(atPath: path + "/build.sh") else { status = "Выбери git-клон Пульта с build.sh."; return }
-        source = path; UserDefaults.standard.set(path, forKey: "updateSource")
-        timer?.invalidate(); start()
-    }
+    let source = (Bundle.main.object(forInfoDictionaryKey: "PultSource") as? String) ?? homeDir + "/Documents/pult"
     var commit: String { (Bundle.main.object(forInfoDictionaryKey: "PultCommit") as? String) ?? "dev" }
-    var version: String { (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "?" }
+    var version: String { (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "0" }
     var hasRepo: Bool { FileManager.default.fileExists(atPath: source + "/.git") }
+    private var timer: Timer?
+    private var asset: URL?
+    private var digest: String?
+    private var releaseVersion = ""
+    private var checking = false
 
-    /// Команда в папке исходников; ответ на главном потоке: (код, вывод).
-    private func run(_ tool: String, _ args: [String], timeout: TimeInterval = 60, _ done: @escaping (Int32, String) -> Void) {
-        let dir = source
-        DispatchQueue.global(qos: .utility).async {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: tool)
-            p.arguments = args
-            p.currentDirectoryURL = URL(fileURLWithPath: dir)
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
-            env["GIT_TERMINAL_PROMPT"] = "0"
-            env.merge(Proxy.shared.env) { _, new in new }
-            p.environment = env
-            let out = Pipe(); p.standardOutput = out; p.standardError = out; p.standardInput = FileHandle.nullDevice
-            do { try p.run() } catch { DispatchQueue.main.async { done(-1, error.localizedDescription) }; return }
-            let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
-            let data = out.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit(); killer.cancel()
-            let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            DispatchQueue.main.async { done(p.terminationStatus, text) }
-        }
+    static func repository(_ input: String) -> String? {
+        var text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        while text.hasSuffix("/") { text.removeLast() }
+        if text.hasSuffix(".git") { text = String(text.dropLast(4)) }
+        guard let url = URLComponents(string: text), url.scheme == "https", url.host == "github.com",
+              url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { return nil }
+        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard path.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil else { return nil }
+        return path
     }
-    private func git(_ args: [String], timeout: TimeInterval = 60, _ done: @escaping (Int32, String) -> Void) { run("/usr/bin/git", args, timeout: timeout, done) }
-
+    static func newer(_ candidate: String, than installed: String) -> Bool {
+        let pattern = #"^\d+\.\d+\.\d+$"#
+        guard candidate.range(of: pattern, options: .regularExpression) != nil else { return false }
+        return candidate.compare(installed, options: .numeric) == .orderedDescending
+    }
+    private func http() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        if Proxy.shared.enabled {
+            config.connectionProxyDictionary = ["HTTPSEnable": 1, "HTTPSProxy": "127.0.0.1", "HTTPSPort": Proxy.shared.port,
+                                               "HTTPEnable": 1, "HTTPProxy": "127.0.0.1", "HTTPPort": Proxy.shared.port]
+        }
+        return URLSession(configuration: config)
+    }
     func start() {
-        guard hasRepo else { status = "Исходники не найдены: " + source; return }
-        git(["remote", "get-url", "origin"]) { [weak self] code, out in
-            self?.remote = code == 0 ? out : ""
-            self?.check()
-        }
-        timer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in self?.check() }
+        check()
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1800, repeats: true) { [weak self] _ in self?.check() }
     }
-
-    func setRemote(_ url: String) {
-        let clean = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard hasRepo, !clean.isEmpty else { return }
-        git(["remote", "remove", "origin"]) { [weak self] _, _ in
-            self?.git(["remote", "add", "origin", clean]) { code, out in
-                self?.remote = code == 0 ? clean : ""
-                self?.status = code == 0 ? "Репозиторий привязан." : "Не удалось привязать: " + out
-                if code == 0 { self?.check(manual: true) }
-            }
-        }
+    func setRemote(_ value: String) {
+        guard !working else { return }
+        guard let repo = Self.repository(value) else { status = "Нужен HTTPS-адрес GitHub: владелец/репозиторий."; return }
+        remote = "https://github.com/" + repo
+        UserDefaults.standard.set(remote, forKey: "updateRepo")
+        available = 0; notes = []; asset = nil; digest = nil
+        check(manual: true)
     }
-
     func check(manual: Bool = false) {
-        guard hasRepo, !working else { return }
-        guard !remote.isEmpty else { status = "GitHub не привязан — укажи адрес репозитория."; return }
-        if manual { status = "Проверяю…" }
-        git(["fetch", "--quiet", "origin"], timeout: 40) { [weak self] code, out in
-            guard let self = self else { return }
-            guard code == 0 else { if manual || self.status.isEmpty { self.status = "GitHub недоступен: " + String(out.suffix(160)) }; return }
-            self.git(["rev-list", "--count", "HEAD..@{upstream}"]) { code, out in
-                guard code == 0, let count = Int(out) else {
-                    self.git(["rev-list", "--count", "HEAD..origin/main"]) { code, out in self.found(code == 0 ? Int(out) ?? 0 : 0, manual: manual, range: "HEAD..origin/main") }
-                    return
+        guard !checking, !working, let repo = Self.repository(remote) else { return }
+        checking = true
+        if manual { status = "Проверяю GitHub Releases…" }
+        let expectedRemote = remote
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/" + repo + "/releases/latest")!)
+        request.timeoutInterval = 25
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let session = http()
+        session.dataTask(with: request) { [weak self] data, response, error in
+            defer { session.finishTasksAndInvalidate() }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.checking = false
+                guard self.remote == expectedRemote else { self.check(manual: manual); return }
+                guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let data = data,
+                      let release = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tag = release["tag_name"] as? String else {
+                    self.status = "Не удалось проверить релизы в " + repo; return
                 }
-                self.found(count, manual: manual, range: "HEAD..@{upstream}")
+                let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+                guard Self.newer(version, than: self.version) else {
+                    self.available = 0; self.notes = []; self.asset = nil
+                    self.status = "Установлена актуальная версия · \(self.version). Репозиторий: \(repo)"; return
+                }
+                guard let assets = release["assets"] as? [[String: Any]],
+                      let file = assets.first(where: { $0["name"] as? String == "Pult-macOS.zip" }),
+                      let size = file["size"] as? Int, size > 0, size < 250_000_000,
+                      let link = file["browser_download_url"] as? String,
+                      link.hasPrefix("https://github.com/" + repo + "/releases/download/"),
+                      let asset = URL(string: link), let digest = file["digest"] as? String,
+                      digest.range(of: #"^sha256:[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+                    self.status = "В релизе нет проверяемого архива Pult-macOS.zip."; return
+                }
+                self.asset = asset; self.digest = String(digest.dropFirst(7)); self.releaseVersion = version; self.available = 1
+                self.notes = [release["name"] as? String ?? tag]
+                self.status = "Доступна версия \(version) · \(repo)"
+                if self.auto && !manual { self.installWhenIdle() }
             }
-        }
+        }.resume()
     }
-
-    private func found(_ count: Int, manual: Bool, range: String) {
-        available = count
-        guard count > 0 else { notes = []; status = "Установлена последняя версия · \(version) (\(commit))"; return }
-        git(["log", "--format=%s", "-8", range]) { [weak self] _, out in
-            guard let self = self else { return }
-            self.notes = out.split(whereSeparator: \.isNewline).map(String.init)
-            self.status = "Доступно обновление: \(count) " + (count == 1 ? "изменение" : "изменений")
-            if self.auto, !manual { self.installWhenIdle() }
-        }
-    }
-
-    /// Автоустановка не прерывает работу: ждём, пока все чаты освободятся.
     private func installWhenIdle() {
         guard auto, available > 0, !working else { return }
-        if Workspace.shared.anyBusy { DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in self?.installWhenIdle() }; return }
+        if Workspace.shared.anyBusy || TeamRoomModel.shared.connected {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in self?.installWhenIdle() }; return
+        }
         install()
     }
-
-    /// Подтянуть коммиты, пересобрать, перезапустить.
     func install(pull: Bool = true) {
-        guard hasRepo, !working else { return }
-        guard !Workspace.shared.anyBusy else { status = "Дождись завершения активных чатов."; return }
-        working = true; status = pull ? "Скачиваю обновление…" : "Пересобираю…"
-        let build = { [weak self] in
-            guard let self = self else { return }
-            self.status = "Собираю новую версию… (около минуты)"
-            self.run("/bin/zsh", [self.source + "/build.sh", "--install", Bundle.main.bundlePath], timeout: 900) { code, out in
-                self.working = false
-                guard code == 0 else { self.status = "Сборка не удалась — работает прежняя версия.\n" + String(out.suffix(400)); notifyMac("Пульт", "Обновление не собралось — осталась прежняя версия"); return }
-                self.available = 0; self.status = "Обновлено. Перезапускаю…"
-                self.relaunch()
-            }
-        }
-        guard pull else { build(); return }
-        git(["pull", "--ff-only", "--quiet"], timeout: 120) { [weak self] code, out in
-            guard let self = self else { return }
-            guard code == 0 else { self.working = false; self.status = "Не удалось подтянуть обновление (есть локальные правки?):\n" + String(out.suffix(300)); return }
-            build()
-        }
+        guard pull else { status = "Локальная сборка доступна через build.sh в папке исходников."; return }
+        guard !working, available > 0, let asset = asset, let digest = digest else { return }
+        guard !Workspace.shared.anyBusy, !TeamRoomModel.shared.connected else { status = "Закончи работу агентов и выйди из общей комнаты перед обновлением."; return }
+        working = true; status = "Скачиваю проверенный релиз…"
+        let expectedVersion = releaseVersion
+        let session = http()
+        session.downloadTask(with: asset) { [weak self] location, response, error in
+            defer { session.finishTasksAndInvalidate() }
+            do {
+                guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let location = location else { throw TeamRoomError("Не удалось скачать архив.") }
+                let data = try Data(contentsOf: location, options: .mappedIfSafe)
+                guard data.count < 250_000_000, SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == digest else {
+                    throw TeamRoomError("Контрольная сумма архива не совпала.")
+                }
+                let stage = FileManager.default.temporaryDirectory.appendingPathComponent("pult-update-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: true)
+                let archive = stage.appendingPathComponent("release.zip"); try data.write(to: archive)
+                let unpack = Process(); unpack.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+                unpack.arguments = ["-x", "-k", archive.path, stage.appendingPathComponent("unpacked").path]
+                try unpack.run(); unpack.waitUntilExit()
+                guard unpack.terminationStatus == 0 else { throw TeamRoomError("Не удалось распаковать релиз.") }
+                let contents = FileManager.default.enumerator(at: stage.appendingPathComponent("unpacked"), includingPropertiesForKeys: nil)
+                var candidate: URL?
+                while let url = contents?.nextObject() as? URL {
+                    if url.lastPathComponent == "Пульт.app" { candidate = url; break }
+                }
+                guard let app = candidate, let bundle = Bundle(url: app),
+                      bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == expectedVersion,
+                      ["local.k.pult", "local.pultpublic.app"].contains(bundle.bundleIdentifier ?? ""),
+                      FileManager.default.fileExists(atPath: app.appendingPathComponent("Contents/MacOS/Pult").path) else {
+                    throw TeamRoomError("Архив не содержит ожидаемую версию Пульта.")
+                }
+                let verify = Process(); verify.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+                verify.arguments = ["--verify", "--deep", "--strict", app.path]
+                try verify.run(); verify.waitUntilExit()
+                guard verify.terminationStatus == 0 else { throw TeamRoomError("Подпись приложения не прошла проверку.") }
+                DispatchQueue.main.async { self?.replace(with: app) }
+            } catch { DispatchQueue.main.async { self?.working = false; self?.status = error.localizedDescription } }
+        }.resume()
     }
-
+    private func replace(with candidate: URL) {
+        guard !Workspace.shared.anyBusy, !TeamRoomModel.shared.connected else { working = false; status = "Обновление отложено: началась работа."; return }
+        let target = URL(fileURLWithPath: Bundle.main.bundlePath)
+        do {
+            guard FileManager.default.isWritableFile(atPath: target.deletingLastPathComponent().path) else { throw TeamRoomError("Нет прав на папку приложения. Перенеси Пульт в ~/Applications.") }
+            _ = try Self.replaceBundle(at: target, with: candidate)
+            working = false; available = 0; status = "Обновлено. Перезапускаю…"; relaunch()
+        } catch { working = false; status = error.localizedDescription }
+    }
+    @discardableResult static func replaceBundle(at target: URL, with candidate: URL) throws -> URL {
+        let fm = FileManager.default
+        let backup = URL(fileURLWithPath: target.path + ".previous")
+        let saved = fm.fileExists(atPath: backup.path) ? URL(fileURLWithPath: backup.path + "." + UUID().uuidString) : backup
+        let incoming = target.deletingLastPathComponent().appendingPathComponent(".pult-incoming-" + UUID().uuidString + ".app")
+        try fm.copyItem(at: candidate, to: incoming)
+        try fm.moveItem(at: target, to: saved)
+        do { try fm.moveItem(at: incoming, to: target) }
+        catch { try? fm.moveItem(at: saved, to: target); throw error }
+        return saved
+    }
     func relaunch() {
-        let app = Bundle.main.bundlePath
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "sleep 1; /usr/bin/open -n \"$0\"", app]
-        try? p.run()
+        let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "sleep 1; /usr/bin/open -n \"$0\"", Bundle.main.bundlePath]
+        try? process.run()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.terminate(nil) }
     }
 }

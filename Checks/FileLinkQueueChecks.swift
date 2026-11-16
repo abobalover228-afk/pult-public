@@ -2,7 +2,6 @@ import AppKit
 @main struct QueueChecks {
 static func main() {
  let chat = Chat(connectImmediately: false)
- chat.target = "codex"
  chat.busy = true
  chat.send("first"); chat.send("second")
  let second = chat.pendingMessages[1]

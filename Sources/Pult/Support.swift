@@ -1,4 +1,36 @@
+// Сервер по SSH, Terminal, панель торгового бота, VLESS-прокси только для «Пульта».
 import Foundation
+
+enum Remote {
+    static var host: String { Secrets.read("PULT_SSH_HOST") ?? "" }
+    static var key: String { Secrets.read("PULT_SSH_KEY") ?? homeDir + "/.ssh/id_ed25519" }
+
+    /// Команда на сервере; ответ (stdout) на главном потоке, nil — ошибка.
+    static func run(_ cmd: String, stdin: String? = nil, timeout: TimeInterval = 45, _ done: @escaping (String?) -> Void) {
+        guard !host.isEmpty else { done(nil); return }
+        DispatchQueue.global().async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            p.arguments = ["-i", key, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2", host, cmd]
+            // Зависший ssh не должен держать панель бота и опрос выкладки вечно.
+            let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+            defer { killer.cancel() }
+            let out = Pipe(), inp = Pipe()
+            p.standardOutput = out; p.standardError = FileHandle.nullDevice; p.standardInput = inp
+            var result: String? = nil
+            do {
+                try p.run()
+                if let s = stdin { inp.fileHandleForWriting.write(s.data(using: .utf8)!) }
+                try? inp.fileHandleForWriting.close()
+                let d = out.fileHandleForReading.readDataToEndOfFile()
+                p.waitUntilExit()
+                if p.terminationStatus == 0 { result = String(data: d, encoding: .utf8) }
+            } catch {}
+            DispatchQueue.main.async { done(result) }
+        }
+    }
+}
 
 enum Terminal {
     static func run(_ cmd: String) {
@@ -18,8 +50,106 @@ func notifyMac(_ title: String, _ text: String) {
     try? p.run()
 }
 
+final class BotStatus: ObservableObject {
+    static let shared = BotStatus()
+    @Published var data: JSON? = nil
+    @Published var loading = false
+    @Published var error: String? = nil
+    @Published var alarm = false                 // красная точка на кнопке «Бот»
+    @Published var changes: [String] = []
+    @Published var workerBusy = false
+    @Published var deployId: String? = UserDefaults.standard.string(forKey: "deployId")
+    @Published var deployLines: [String] = []
+    @Published var deployActive = false
+    private var seen = Set(UserDefaults.standard.array(forKey: "seenTrades") as? [Int] ?? [])     // хранится по возрастанию id
+    private var timer: Timer?
+
+    /// Фоновая проверка: бот упал / сделка −40% и хуже / новая выкладка.
+    func startWatching() {
+        guard !Remote.host.isEmpty else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 90, repeats: true) { [weak self] _ in self?.refresh(silent: true) }
+        refresh(silent: true)
+    }
+
+    func refreshChanges() {
+        Remote.run("python3 /usr/local/lib/coder-chat/deploy_ctl.py changes") { [weak self] out in
+            guard let d = out?.data(using: .utf8), let j = (try? JSONSerialization.jsonObject(with: d)) as? JSON else { return }
+            self?.changes = (j["files"] as? [String]) ?? []
+            self?.workerBusy = (j["worker_busy"] as? Bool) ?? false
+        }
+        if let id = deployId { pollDeploy(id) }
+    }
+
+    func startDeploy() {
+        deployLines = ["Запускаю…"]; deployActive = true
+        Remote.run("python3 /usr/local/lib/coder-chat/deploy_ctl.py start") { [weak self] out in
+            guard let self = self else { return }
+            let id = (out ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !id.isEmpty else { self.deployActive = false; self.deployLines = ["Не запустилось: программист работает или уже идёт выкладка."]; return }
+            self.deployId = id; UserDefaults.standard.set(id, forKey: "deployId")
+            self.pollDeploy(id)
+        }
+    }
+
+    private var pollFailures = 0
+    func pollDeploy(_ id: String) {
+        Remote.run("python3 /usr/local/lib/coder-chat/deploy_ctl.py log \(id)") { [weak self] out in
+            guard let self = self else { return }
+            guard let d = out?.data(using: .utf8), let j = (try? JSONSerialization.jsonObject(with: d)) as? JSON else {
+                // Сеть моргнула: пробуем ещё, а не бросаем выкладку в состоянии «идёт».
+                self.pollFailures += 1
+                if self.deployActive, self.pollFailures <= 20 { DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.pollDeploy(id) } }
+                else if self.deployActive {
+                    self.deployActive = false
+                    self.deployLines.append("Связь с сервером потеряна — результат выкладки неизвестен. Открой панель позже.")
+                    notifyMac("Выкладка", "⚠️ Связь потеряна, результат неизвестен")
+                }
+                return
+            }
+            self.pollFailures = 0
+            self.deployLines = (j["lines"] as? [String]) ?? []
+            let wasActive = self.deployActive
+            self.deployActive = (j["active"] as? Bool) ?? false
+            if self.deployActive { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.pollDeploy(id) } }
+            else if wasActive {
+                let res = self.deployLines.last { $0.hasPrefix("RESULT") } ?? "RESULT ?"
+                notifyMac("Выкладка", res.contains("deployed") ? "✅ Выложено, бот работает" : res.contains("rolled_back") ? "↩️ Не вышло — откатил" : "❌ Не выложено")
+                self.refreshChanges()
+            }
+        }
+    }
+
+    func refresh(silent: Bool = false) {
+        if !silent { loading = true; error = nil }
+        Remote.run("python3 /usr/local/lib/coder-chat/bot_status.py") { [weak self] out in
+            guard let self = self else { return }
+            self.loading = false
+            guard let out = out, let d = out.data(using: .utf8),
+                  let j = (try? JSONSerialization.jsonObject(with: d)) as? JSON else {
+                if !silent { self.error = "Сервер не ответил" }; return
+            }
+            self.data = j
+            let down = (j["service"] as? String) != "active"
+            if down && !self.alarm { notifyMac("Торговый бот", "⛔ Служба не работает: \((j["service"] as? String) ?? "?")") }
+            self.alarm = down
+            let first = self.seen.isEmpty
+            for r in (j["last"] as? [JSON]) ?? [] {
+                guard let id = (r["id"] as? NSNumber)?.intValue, !self.seen.contains(id) else { continue }
+                self.seen.insert(id)
+                let p = (r["pnl_pct"] as? NSNumber)?.doubleValue ?? 0
+                if !first && p <= -40 {
+                    notifyMac("Торговый бот", String(format: "🔻 #%d закрыта %+.0f%% (%@)", id, p, (r["reason"] as? String) ?? ""))
+                    self.alarm = true
+                }
+            }
+            if self.seen.count > 500 { self.seen = Set(self.seen.sorted().suffix(500)) }
+            UserDefaults.standard.set(self.seen.sorted(), forKey: "seenTrades")
+        }
+    }
+}
+
 /// VLESS только для процессов «Пульта»: локальный xray (HTTP-прокси 127.0.0.1:10809) и переменные окружения
-/// для запускаемых Codex/Claude. Ссылка: ~/Library/Application Support/PultPublic/vless.txt (600), xray: ~/Library/Application Support/PultPublic/bin/xray.
+/// для запускаемых Codex/Claude. Ссылка: ~/Documents/pult/vless.txt (600), xray: ~/Documents/pult/bin/xray.
 final class Proxy: ObservableObject {
     static let shared = Proxy()
     static let dir = appDataDir

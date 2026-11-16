@@ -95,11 +95,14 @@ struct RootView: View {
         ZStack(alignment: .top) {
             HStack(spacing: 0) {
                 if workspace.sidebar { SidebarView(workspace: workspace, chat: workspace.active); Divider().opacity(0.25) }
+                if workspace.showTeamChat { TeamChatPanel(workspace: workspace); Divider().opacity(0.25) }
                 ChatView(chat: workspace.active, workspace: workspace).id(workspace.active.sessionID)
+                if workspace.showTeamTasks { Divider().opacity(0.25); TeamTasksPanel(workspace: workspace) }
             }
             if let toast = workspace.toast { ToastView(text: toast).transition(.opacity) }
             if workspace.showPalette { PaletteView(workspace: workspace) }
         }
+        .sheet(isPresented: $workspace.showGuide) { GuideView() }
         .background(PultBackground())
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
@@ -153,12 +156,15 @@ struct SidebarView: View {
     @ObservedObject private var limits = LimitsStore.shared
     @ObservedObject private var updater = Updater.shared
     @ObservedObject private var telegram = TelegramBridge.shared
+    @ObservedObject private var trash = ChatTrash.shared
+    @StateObject private var showingTrash = Flag()
     var ui: UIState { chat.ui }
 
     var history: [(String, [ThreadInfo])] {
         let q = workspace.search.trimmingCharacters(in: .whitespaces).lowercased()
         let open = Set(workspace.chats.map(\.conversationKey))
-        let all = chat.threads.filter { !open.contains($0.id) && (q.isEmpty || $0.title.lowercased().contains(q) || $0.account.lowercased().contains(q) || $0.cwd.lowercased().contains(q)) }
+        let source = showingTrash.on ? trash.entries.map(\.thread) : chat.threads
+        let all = source.filter { (showingTrash.on || !trash.ids.contains($0.id)) && !open.contains($0.id) && (q.isEmpty || $0.title.lowercased().contains(q) || $0.account.lowercased().contains(q) || $0.cwd.lowercased().contains(q)) }
         let calendar = Calendar.current
         var groups: [(String, [ThreadInfo])] = []
         func add(_ name: String, _ rows: [ThreadInfo]) { if !rows.isEmpty { groups.append((name, rows)) } }
@@ -204,10 +210,26 @@ struct SidebarView: View {
                     .background(RoundedRectangle(cornerRadius: 7).fill(card))
                     .padding(.top, 12).padding(.bottom, 2)
 
+                    HStack {
+                        Button { showingTrash.on.toggle() } label: {
+                            Label(showingTrash.on ? "Вернуться к истории" : "Корзина (\(trash.entries.count))", systemImage: "trash")
+                        }.buttonStyle(.plain)
+                        Spacer()
+                        if !showingTrash.on {
+                            Menu {
+                                Button("Убрать чаты старше 30 дней") {
+                                    let cutoff = Date().addingTimeInterval(-30 * 86400)
+                                    let open = Set(workspace.chats.map(\.conversationKey))
+                                    trash.move(chat.threads.filter { $0.date < cutoff && !open.contains($0.id) })
+                                    chat.loadThreads()
+                                }
+                            } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).frame(width: 24)
+                        }
+                    }.font(uiSmall).foregroundColor(.secondary).padding(.vertical, 6)
                     ForEach(history, id: \.0) { name, rows in
                         sectionTitle(name)
                         ForEach(rows) { thread in
-                            Button { workspace.open(thread) } label: {
+                            Button { if showingTrash.on { trash.restore(thread.id); chat.loadThreads() }; workspace.open(thread) } label: {
                                 HoverRow { _ in
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(thread.title).font(uiFont).lineLimit(1)
@@ -217,6 +239,11 @@ struct SidebarView: View {
                                 }
                             }.buttonStyle(.plain)
                             .contextMenu {
+                                if showingTrash.on {
+                                    Button("Восстановить") { trash.restore(thread.id); chat.loadThreads() }
+                                } else {
+                                    Button("Убрать в корзину", role: .destructive) { trash.move([thread]); chat.loadThreads() }
+                                }
                                 Button(preferences.pins.contains(thread.id) ? "Открепить" : "Закрепить сверху") { preferences.togglePin(thread.id) }
                                 Button("Открыть в новом чате") { workspace.newChat(inherit: false).open(thread) }
                             }
@@ -232,6 +259,7 @@ struct SidebarView: View {
         }
         .frame(width: 272)
         .background(panel.opacity(0.94))
+
     }
 
     func sectionTitle(_ text: String, extra: String? = nil) -> some View {
@@ -240,6 +268,20 @@ struct SidebarView: View {
             Spacer()
             if let extra = extra { Text(extra).font(.system(size: 10, weight: .medium)).foregroundColor(accent) }
         }.padding(.horizontal, 8).padding(.top, 10).padding(.bottom, 3)
+    }
+
+    func quotaRow(_ label: String, used: Double?, reset: Double?) -> some View {
+        let left = used.map { max(0, min(100, 100 - $0)) }
+        return HStack(spacing: 5) {
+            Text(label).font(.system(size: 9)).foregroundColor(.secondary).frame(width: 23, alignment: .leading)
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.08))
+                    if let left = left { Capsule().fill(barColor(left)).frame(width: geometry.size.width * CGFloat(left / 100)) }
+                }
+            }.frame(height: 4)
+            Text(left.map { "\(Int($0))%" } ?? "—").font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary).frame(width: 32, alignment: .trailing)
+        }.help(reset.map { "Сброс: " + Date(timeIntervalSince1970: $0).formatted(date: .abbreviated, time: .shortened) } ?? "Время сброса пока неизвестно")
     }
 
     var footer: some View {
@@ -256,21 +298,21 @@ struct SidebarView: View {
                 }.buttonStyle(.plain).disabled(updater.working).help(updater.notes.joined(separator: "\n"))
             }
             ForEach(Array(chat.accounts.enumerated()), id: \.element.id) { index, account in
-                let left = chat.remaining(account)
+                let quota = limits.limits[account.home]
                 Button { if !chat.busy && !chat.nativeCLIIsRunning { chat.chooseCodex(index) } } label: {
-                    HStack(spacing: 6) {
-                        Text(account.name).font(uiSmall).lineLimit(1).frame(width: 74, alignment: .leading)
+                    HStack(spacing: 8) {
+                        Text(account.name).font(uiSmall).lineLimit(1).frame(width: 62, alignment: .leading)
                             .foregroundColor(chat.target == "codex" && index == chat.current ? .primary : .secondary)
-                        GeometryReader { geometry in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.white.opacity(0.08))
-                                Capsule().fill(barColor(left)).frame(width: max(2, geometry.size.width * CGFloat((left ?? 0) / 100)))
-                            }
-                        }.frame(height: 4)
-                        Text(left.map { "\(Int($0))%" } ?? "—").font(.system(size: 10.5, design: .monospaced)).foregroundColor(.secondary).frame(width: 34, alignment: .trailing)
-                    }.contentShape(Rectangle())
-                }.buttonStyle(.plain).help("Осталось лимита у «\(account.name)». Нажми — перейти на этот аккаунт")
+                        VStack(spacing: 4) {
+                            quotaRow("5ч", used: quota?.five, reset: quota?.fiveReset)
+                            quotaRow("Нед", used: quota?.week, reset: quota?.weekReset)
+                        }
+                    }.padding(.vertical, 3).contentShape(Rectangle())
+                }.buttonStyle(.plain).help("Остаток за 5 часов и неделю у «\(account.name)». Нажми — перейти на аккаунт")
             }
+            Button { workspace.showTeamRoom = true } label: {
+                Label("Общий проект", systemImage: "person.2.fill").font(uiFont)
+            }.buttonStyle(.plain).padding(.vertical, 6)
             HStack(spacing: 8) {
                 if telegram.configured {
                     Label(telegram.paired ? "Telegram" : "Telegram: нужен код", systemImage: "paperplane.fill").font(.system(size: 10.5))
@@ -384,6 +426,7 @@ struct ChatView: View {
     @StateObject private var follow = FollowState()
     @ObservedObject private var preferences = ConversationPreferences.shared
     @ObservedObject private var apiStore = APIConnectionStore.shared
+    @ObservedObject var bot = BotStatus.shared
     @ObservedObject var voice = Voice.shared
     @FocusState private var inputFocused: Bool
 
@@ -417,6 +460,8 @@ struct ChatView: View {
             Text(chat.title).font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.tail)
             StatusPill(status: chat.status)
             Spacer(minLength: 8)
+            Button { workspace.showTeamChat.toggle() } label: { Image(systemName: "bubble.left.and.bubble.right") }.help("Чат команды")
+            Button { workspace.showTeamTasks.toggle() } label: { Image(systemName: "checklist") }.help("Общая доска задач")
             accountMenu
             Button { chat.askClaude() } label: { Chip(icon: "sparkle", text: "Отдать Claude") }
                 .buttonStyle(.plain)
@@ -427,9 +472,9 @@ struct ChatView: View {
                     Button("Открыть разговор с Claude в Terminal") { chat.claudeInTerminal() }
                     Button("Начать с Claude заново (новый разговор)") { chat.resetClaude() }
                 }
-            Button { workspace.showGuide = true } label: {
-                Chip(icon: "questionmark.circle", text: "Гайд")
-            }.buttonStyle(.plain).help("Как пользоваться Пультом (⌘?)")
+            Button { ui.showBot = true } label: {
+                Chip(icon: "chart.line.uptrend.xyaxis", text: "Бот", active: bot.alarm, tint: .red)
+            }.buttonStyle(.plain).help("Торговый бот: состояние и выкладка")
             Button { workspace.sidebar.toggle() } label: { EmptyView() }.keyboardShortcut("\\", modifiers: .command).frame(width: 0, height: 0).opacity(0)
         }
         .padding(.horizontal, 14).frame(height: 44)
@@ -568,7 +613,7 @@ struct ChatView: View {
             }
             return true
         }
-        .sheet(isPresented: $workspace.showGuide) { GuideView() }
+        .sheet(isPresented: $ui.showBot) { BotView(close: { ui.showBot = false }) }
         .onChange(of: apiStore.revision) { _ in chat.apiConfigurationDidChange() }
         .sheet(isPresented: $chat.showAPIConnections) { APIConnectionsView(store: apiStore, onSelect: { chat.chooseAPI($0) }, canSelect: idle) }
         .onChange(of: chat.showCommandSettings) { show in if show { ui.showSettings = true; chat.showCommandSettings = false } }
@@ -577,6 +622,7 @@ struct ChatView: View {
         .alert(item: $chat.pendingNativeAction) { action in
             Alert(title: Text(action.title), message: Text(action.message), primaryButton: .destructive(Text("Выполнить")) { action.perform() }, secondaryButton: .cancel())
         }
+        .sheet(isPresented: $workspace.showTeamRoom) { TeamRoomView(workspace: workspace) }
         .sheet(isPresented: $ui.showSettings) { SettingsView(chat: chat, close: { ui.showSettings = false }) }
     }
 
@@ -776,7 +822,7 @@ struct PaletteView: View {
             PaletteEntry(id: "provider", icon: "arrow.left.arrow.right", title: chat.target == "claude" ? "Переключить на Codex" : "Переключить на Claude", detail: "Кто отвечает в этом чате") { if !chat.busy { chat.target = chat.target == "claude" ? "codex" : "claude" } },
             PaletteEntry(id: "model", icon: "cpu", title: "Выбрать модель", detail: chat.modelLabel) { chat.ui.showModel = true },
             PaletteEntry(id: "settings", icon: "gearshape", title: "Настройки", detail: "Telegram, обновления, голос, VLESS") { chat.ui.showSettings = true },
-            PaletteEntry(id: "guide", icon: "questionmark.circle", title: "Гайд по Пульту", detail: "Чаты, Telegram, голос, обновления") { workspace.showGuide = true },
+            PaletteEntry(id: "bot", icon: "chart.line.uptrend.xyaxis", title: "Торговый бот", detail: "Состояние и выкладка") { chat.ui.showBot = true },
             PaletteEntry(id: "approve", icon: "checkmark.shield", title: chat.autoApprove ? "Спрашивать разрешение на действия" : "Подтверждать действия за меня", detail: "Сейчас: " + (chat.autoApprove ? "без вопросов" : "спрашивает")) { chat.toggleAutoApprove() },
             PaletteEntry(id: "rules", icon: "text.badge.checkmark", title: "Правила чата", detail: "Общие и для этого чата") { chat.showRules = true },
             PaletteEntry(id: "limits", icon: "gauge.with.dots.needle.50percent", title: "Обновить лимиты", detail: "Все аккаунты") { chat.refreshAllLimits(force: true); workspace.say("Лимиты обновляются") },
@@ -784,7 +830,7 @@ struct PaletteView: View {
             PaletteEntry(id: "close", icon: "xmark", title: "Закрыть этот чат", detail: "⌘W") { workspace.close(chat) }
         ]
         let open = Set(workspace.chats.map(\.conversationKey))
-        all += chat.threads.filter { !open.contains($0.id) }.prefix(state.query.isEmpty ? 8 : 400).map { t in
+        all += chat.threads.filter { !ChatTrash.shared.ids.contains($0.id) && !open.contains($0.id) }.prefix(state.query.isEmpty ? 8 : 400).map { t in
             PaletteEntry(id: "thread" + t.id, icon: "clock.arrow.circlepath", title: t.title, detail: t.account + " · " + relFmt.localizedString(for: t.date, relativeTo: Date())) { workspace.open(t) }
         }
         let q = state.query.trimmingCharacters(in: .whitespaces).lowercased()
@@ -873,7 +919,7 @@ struct SettingsView: View {
                 case "voice": voiceSection
                 case "net": networkSection
                 case "look": lookSection
-                case "guide": Section("Помощь") { Button("Открыть гайд по Пульту") { close(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { Workspace.shared.showGuide = true } } }
+                case "guide": Section("Помощь") { Button("Открыть гайд") { close(); DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { Workspace.shared.showGuide = true } } }
                 default: workSection
                 }
             }.formStyle(.grouped)
@@ -941,26 +987,21 @@ struct SettingsView: View {
         Section("Версия") {
             LabeledContent("Установлено", value: "\(updater.version) · \(updater.commit)")
             LabeledContent("Исходники", value: updater.source.replacingOccurrences(of: homeDir, with: "~"))
-            Button("Выбрать папку исходников…") {
-                let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
-                if panel.runModal() == .OK, let url = panel.url { updater.setSource(url.path) }
-            }
             if !updater.status.isEmpty { Text(updater.status).font(.callout).textSelection(.enabled) }
             if !updater.notes.isEmpty { Text(updater.notes.map { "• " + $0 }.joined(separator: "\n")).font(.caption).foregroundColor(.secondary) }
             HStack {
                 Button("Проверить сейчас") { updater.check(manual: true) }.disabled(updater.working || updater.remote.isEmpty)
                 Button("Обновить") { updater.install() }.disabled(updater.working || updater.available == 0)
-                Button("Пересобрать из исходников") { updater.install(pull: false) }.disabled(updater.working)
                 if updater.working { ProgressView().controlSize(.small) }
             }
         }
         Section("GitHub") {
             HStack {
-                TextField("https://github.com/имя/pult.git", text: $form.remote)
+                TextField("https://github.com/abobalover228-afk/pult-public", text: $form.remote)
                 Button("Привязать") { updater.setRemote(form.remote) }.disabled(form.remote.trimmingCharacters(in: .whitespaces).isEmpty || form.remote == updater.remote)
             }
             Toggle("Ставить обновления автоматически, когда все чаты свободны", isOn: $updater.auto)
-            Text("Пульт раз в полчаса смотрит репозиторий. Появились новые коммиты — подтягивает, пересобирает и перезапускается. Если сборка не удалась, остаётся прежняя версия.").font(.caption).foregroundColor(.secondary)
+            Text("Пульт раз в полчаса проверяет готовые релизы этого репозитория. Скачивает более новую версию, проверяет SHA-256 и подпись, сохраняет предыдущую копию приложения и перезапускается, когда работа закончена.").font(.caption).foregroundColor(.secondary)
         }
     }
 

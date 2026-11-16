@@ -4,6 +4,20 @@ cd "$(dirname "$0")"
 mkdir -p dist .build/module-cache
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache"
 export SWIFT_MODULECACHE_PATH="$PWD/.build/module-cache"
+swift build -c release --product Pult
+BIN_DIR="$(swift build -c release --show-bin-path)"
+APP="dist/Пульт.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/helpers" "$APP/Contents/Frameworks"
+cp Bundle/Info.plist "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :PultCommit string $(git rev-parse --short HEAD)" "$APP/Contents/Info.plist"
+cp Bundle/*.icns Bundle/WebRTC-LICENSE.md "$APP/Contents/Resources/"
+cp Resources/helpers/*.py Resources/helpers/*.sh "$APP/Contents/Resources/helpers/"
+FRAMEWORK=".build/artifacts/webrtc/WebRTC/WebRTC.xcframework/macos-x86_64_arm64/WebRTC.framework"
+ditto "$FRAMEWORK" "$APP/Contents/Frameworks/WebRTC.framework"
+cp "$BIN_DIR/Pult" "$APP/Contents/MacOS/Pult"
+install_name_tool -add_rpath @executable_path/../Frameworks "$APP/Contents/MacOS/Pult"
+codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict "$APP"
 make_app() {
   local name="$1" executable="$2" identifier="$3" accessory="$4"
   local bundle="dist/$name.app"
@@ -20,9 +34,9 @@ make_app() {
 <key>CFBundleIdentifier</key><string>$identifier</string>
 <key>CFBundleExecutable</key><string>$executable</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>2.0.0</string>
+<key>CFBundleShortVersionString</key><string>2.2.0</string>
 <key>CFBundleIconFile</key><string>${executable}AppIcon.icns</string>
-<key>CFBundleVersion</key><string>2.0.0</string>
+<key>CFBundleVersion</key><string>2.2.0</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><$accessory/>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>pultpublic</string><key>CFBundleURLSchemes</key><array><string>pultpublic</string></array></dict></array>
@@ -31,24 +45,10 @@ make_app() {
 </dict></plist>
 PLIST
 }
-make_app 'Пульт' Pult local.pultpublic.app false
-/usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string Диктовка задач голосом" 'dist/Пульт.app/Contents/Info.plist'
-/usr/libexec/PlistBuddy -c "Add :NSSpeechRecognitionUsageDescription string Распознавание задач голосом" 'dist/Пульт.app/Contents/Info.plist'
-/usr/libexec/PlistBuddy -c "Add :PultCommit string $(git rev-parse --short HEAD)" 'dist/Пульт.app/Contents/Info.plist'
-/usr/libexec/PlistBuddy -c "Add :PultSource string $PWD" 'dist/Пульт.app/Contents/Info.plist'
 make_app 'Лимиты' Limits local.pultpublic.limits true
 /usr/libexec/PlistBuddy -c "Delete :CFBundleURLTypes" "dist/Лимиты.app/Contents/Info.plist"
-xcrun swiftc -target "$(uname -m)-apple-macos14.0" -O -parse-as-library -module-name Pult -module-cache-path "$CLANG_MODULE_CACHE_PATH" Sources/Pult/*.swift -o 'dist/Пульт.app/Contents/MacOS/Pult'
 xcrun swiftc -target "$(uname -m)-apple-macos14.0" -O -parse-as-library -module-name Limits -module-cache-path "$CLANG_MODULE_CACHE_PATH" Sources/Limits/*.swift -o 'dist/Лимиты.app/Contents/MacOS/Limits'
-codesign --force --deep --sign - 'dist/Пульт.app'
 codesign --force --deep --sign - 'dist/Лимиты.app'
+codesign --verify --deep --strict 'dist/Лимиты.app'
 ditto -c -k --keepParent dist Pult-macOS.zip
-printf '\nГотово: dist/Пульт.app и dist/Лимиты.app\n'
-
-if [[ "${1:-}" == "--install" ]]; then
-  target="${2:?Укажи путь приложения}"
-  [[ "$target" == *.app ]] || { echo 'Нужен путь .app'; exit 1; }
-  ditto 'dist/Пульт.app' "$target"
-  codesign --force --deep --sign - "$target"
-  codesign --verify --deep --strict "$target"
-fi
+shasum -a 256 Pult-macOS.zip > Pult-macOS.zip.sha256
