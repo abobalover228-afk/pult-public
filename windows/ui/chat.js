@@ -318,6 +318,7 @@ async function run(c, job, continuation = false) {
     const images = job.attachments.filter(isImage), docs = job.attachments.filter(p => !images.includes(p));
     const text = job.text + (docs.length ? `\n\nПриложенные файлы:\n${docs.join('\n')}` : '');
     const input = [...(text ? [{ type: 'text', text, text_elements: [] }] : []), ...images.map(path => ({ type: 'localImage', path }))];
+    c.pendingUserId = continuation ? null : c.messages[mark]?.id;
     const r = await rpc(c, 'turn/start', { threadId: c.thread, input, model: c.model || null, effort: c.effort || null, serviceTier: c.fast ? 'fast' : 'default' });
     if (c.epoch !== epoch || !c.busy) return;
     const seed = c.pendingSeed; c.pendingSeed = null; c.turn = r.turn.id; (c.turnMarks ||= []).push({ turn: c.turn, count: mark, ...(seed && {seed}) });
@@ -337,6 +338,13 @@ async function interrupt(id = active?.id) {
 function ingest(c, it, done = false) {
   const kind = { agentMessage: 'agent', userMessage: 'user', commandExecution: 'command', fileChange: 'file', reasoning: 'thinking', mcpToolCall: 'command' }[it.type]; if (!kind) return;
   const text = it.text ?? it.command ?? (it.content || []).map(x => x.text || '').join('\n');
+  if (kind === 'user') {
+    const local = c.messages.find(m => m.codexItemId === it.id || m.id === c.pendingUserId);
+    if (local) {
+      c.pendingUserId = null;
+      return add(c, kind, local.text, local.id, { done, codexItemId: it.id });
+    }
+  }
   return add(c, kind, kind === 'file' ? (it.changes || []).map(x => x.path).join('\n') : text, it.id, { done, output: it.aggregatedOutput || (it.summary || []).join('\n') });
 }
 async function prepareRules(c, rules, previous, epoch) {
@@ -360,6 +368,7 @@ async function saveConversation(c) {
 async function finish(c, turn) {
   if (c.pendingSeed && ['failed','interrupted'].includes(turn.status)) c.seed ||= c.pendingSeed;
   c.pendingSeed = null;
+  c.pendingUserId = null;
   c.busy = false; c.turn = null;
   for (const m of c.messages.filter(m => ['approval', 'question'].includes(m.kind) && !m.done)) { m.done = true; m.text += ' · Истекло'; if (c === active) renderMessage(m); }
   if (turn.error?.codexErrorInfo === 'usageLimitExceeded' && prefs.autoSwitch !== false) {

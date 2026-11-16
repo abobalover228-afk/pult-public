@@ -1,4 +1,38 @@
 import { test, expect } from '@playwright/test';
+test('Codex echoes reconcile with local messages, including repeated text and attachments', async ({ page }) => {
+  await page.addInitScript(() => {
+    const listeners = {};
+    let turn = 0;
+    window.__TAURI__ = { event: { listen: async (name, fn) => { (listeners[name] ||= []).push(fn); return () => {}; } }, core: { invoke: async (_, r) => {
+      if (r.module === 'app') return ({ accounts: [], info: { home: '/tmp', os: 'windows' }, settings: {} })[r.method] ?? null;
+      if (r.method === 'threads' || r.method === 'list') return [];
+      if (r.method === 'rpc') {
+        if (r.args.method === 'thread/start') return { thread: { id: 'thread', turns: [] } };
+        if (r.args.method === 'turn/start') {
+          const id = `turn-${++turn}`;
+          const emit = (method, params) => Promise.all(listeners.codex.map(fn => fn({ payload: { chat: r.args.chat, gen: r.args.gen, method, params } })));
+          const item = { id: `user-${turn}`, type: 'userMessage', content: r.args.params.input };
+          await emit('item/started', { item });
+          await emit('item/completed', { item });
+          setTimeout(() => emit('turn/completed', { turn: { id, status: 'completed' } }), 20);
+          return { turn: { id } };
+        }
+      }
+      return null;
+    } } };
+  });
+  await page.goto('/');
+  for (let count = 1; count <= 2; count++) {
+    await page.evaluate(async () => {
+      const { ui } = await import('/core.js');
+      await ui.chats.send('на гит обнову', { literal: true, attachments: ['/tmp/picture.png', '/tmp/doc.txt'] });
+    });
+    await expect(page.locator('.message.user')).toHaveCount(count);
+    await expect.poll(() => page.evaluate(async () => !!(await import('/core.js')).ui.chats.current().busy)).toBe(false);
+  }
+  expect(await page.evaluate(async () => (await import('/core.js')).ui.chats.current().messages.filter(m => m.kind === 'user').map(m => ({ text: m.text, attachments: m.attachments, server: m.codexItemId })))).toEqual([1, 2].map(n => ({ text: 'на гит обнову', attachments: ['/tmp/picture.png', '/tmp/doc.txt'], server: `user-${n}` })));
+});
+
 test('local Claude transcript restores its session and message history', async ({ page }) => {
   await page.addInitScript(() => {
     window.__TAURI__ = { event: { listen: async () => () => {} }, core: { invoke: async (_, r) => {
