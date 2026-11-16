@@ -13,10 +13,10 @@ test('binary room fragments match the Swift packet schema',async({page})=>{
 test(`two real WebRTC peers exchange fragmented packets through original rendezvous (${process.env.PULT_RTC_NATIVE_NETWORK === '1' ? 'native network' : 'loopback candidates'})`,async({playwright,request})=>{
  const browser=await playwright.chromium.launch({args:['--allow-loopback-in-peer-connection','--disable-features=WebRtcHideLocalIpsWithMdns','--enable-webrtc-localhost-ip-including-loopback','--force-webrtc-ip-handling-policy=default_public_and_private_interfaces','--force-fieldtrials=WebRTC-AllowLoopback/Enabled/']});
  const {spawn}=await import('node:child_process');
- const server=spawn('python3',['../signaling/server.py'],{env:{...process.env,PULT_SIGNAL_PORT:'18787'},stdio:'ignore'});
+ const server=spawn(process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'),['../signaling/server.py'],{env:{...process.env,PULT_SIGNAL_PORT:'18787'},stdio:'ignore'});
  try{
   let created;
-  for(let i=0;i<50;i++){try{const response=await request.post('http://127.0.0.1:18787/v1/rooms',{data:{}});if(response.status()===201){created=await response.json();break;}}catch{}await new Promise(r=>setTimeout(r,100));}
+  for(let i=0;i<100;i++){try{const response=await request.post('http://127.0.0.1:18787/v1/rooms',{data:{}});if(response.status()===201){created=await response.json();break;}}catch{}await new Promise(r=>setTimeout(r,100));}
   expect(created).toBeTruthy();
   const invite={server:'http://127.0.0.1:18787',...created,key:Buffer.alloc(32,7).toString('base64')};
   const pages=[await browser.newPage(),await browser.newPage()];
@@ -141,10 +141,10 @@ test('pasting another invitation after creation never adopts its host identity',
 
 test('two peers that cannot connect directly talk through the encrypted server relay',async({browser,request})=>{
  const {spawn}=await import('node:child_process');
- const server=spawn('python3',['../signaling/server.py'],{env:{...process.env,PULT_SIGNAL_PORT:'18788',PULT_SIGNAL_RELAY:'1'},stdio:'ignore'});
+ const server=spawn(process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'),['../signaling/server.py'],{env:{...process.env,PULT_SIGNAL_PORT:'18788',PULT_SIGNAL_RELAY:'1'},stdio:'ignore'});
  try{
   let created;
-  for(let i=0;i<50;i++){try{const response=await request.post('http://127.0.0.1:18788/v1/rooms',{data:{}});if(response.status()===201){created=await response.json();break;}}catch{}await new Promise(r=>setTimeout(r,100));}
+  for(let i=0;i<100;i++){try{const response=await request.post('http://127.0.0.1:18788/v1/rooms',{data:{}});if(response.status()===201){created=await response.json();break;}}catch{}await new Promise(r=>setTimeout(r,100));}
   expect(created).toBeTruthy();
   const invite={server:'http://127.0.0.1:18788',...created,key:Buffer.alloc(32,9).toString('base64')};
   const pages=[await browser.newPage(),await browser.newPage()];

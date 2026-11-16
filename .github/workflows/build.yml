@@ -1,21 +1,43 @@
-name: Build macOS apps
+name: macOS Rust
 on:
   push:
+    paths: ['windows/**', '.github/workflows/build.yml']
   pull_request:
+    paths: ['windows/**', '.github/workflows/build.yml']
   workflow_dispatch:
 permissions:
-  contents: write
+  contents: read
 jobs:
   macos:
     runs-on: macos-15
+    defaults:
+      run:
+        working-directory: windows
     steps:
       - uses: actions/checkout@v4
-      - name: Check
-        run: bash check.sh
-      - name: Build apps
-        run: bash build.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: windows
+      - run: npm ci --ignore-scripts
+      - run: npm run vendor
+      - run: npm run check
+      - run: npx playwright install chromium
+      - run: npm test
+      - run: cargo test --locked
+      - run: npm run build:macos
+      - name: Package app
+        run: ditto -c -k --sequesterRsrc --keepParent 'target/release/bundle/macos/Пульт Rust.app' Pult-Rust-macOS-arm64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: Pult-macOS
-          path: Pult-macOS.zip
+          name: Pult-Rust-macOS-arm64
+          path: windows/Pult-Rust-macOS-arm64.zip
           if-no-files-found: error
