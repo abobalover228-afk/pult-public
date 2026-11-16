@@ -44,6 +44,29 @@ jobs:
             throw 'Pult UI startup timed out'
           }
           if ($app.ExitCode -ne 0) { throw "Pult UI failed: $($app.ExitCode)" }
+      - name: Installed app smoke test
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem target/release/bundle/nsis/*.exe)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one installer' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'Pult проверка пути с пробелами'
+          $setup = Start-Process -FilePath $installers[0].FullName -ArgumentList "/S /D=$installDir" -PassThru
+          if (-not $setup.WaitForExit(120000)) {
+            Stop-Process -Id $setup.Id
+            throw 'Installer timed out'
+          }
+          if ($setup.ExitCode -ne 0) { throw "Installer failed: $($setup.ExitCode)" }
+          $installed = Join-Path $installDir 'pult.exe'
+          if (-not (Test-Path $installed)) { throw 'Installed executable is missing' }
+          $app = Start-Process -FilePath $installed -ArgumentList '--smoke-test' -PassThru
+          if (-not $app.WaitForExit(30000)) {
+            Stop-Process -Id $app.Id
+            throw 'Installed UI startup timed out'
+          }
+          if ($app.ExitCode -ne 0) { throw "Installed UI failed: $($app.ExitCode)" }
+          node scripts/test-mcp-stdio.mjs $installed
+          if ($LASTEXITCODE -ne 0) { throw 'Installed MCP smoke test failed' }
+          Write-Output "Installed and launched from $installDir"
       - name: Checksums
         shell: pwsh
         run: |
