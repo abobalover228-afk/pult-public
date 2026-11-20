@@ -437,3 +437,13 @@ html.dk-page,html.dk-page body{background:transparent!important;min-height:0;ove
 @keyframes cv-glow{0%,12%{border-color:color-mix(in srgb,var(--accent) 70%,transparent);color:var(--text);box-shadow:0 0 18px -6px var(--accent)}22%,100%{border-color:var(--line);box-shadow:none}}
 @media(max-width:900px){.cv-hero{grid-template-columns:auto 1fr}.cv-stats{grid-column:1/-1;grid-template-columns:repeat(4,1fr)}.cv-roles{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){.cv *,.cv *::before,.cv *::after{animation:none!important;transition:none!important}}
+/* Окно входа: текст и кнопки ужимаются и переносятся, а не вылезают за карточку */
+.ac-card header{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.ac-card header strong{font-size:14px}
+.ac-step>div{min-width:0;flex:1;display:grid;gap:3px}
+.ac-step small{line-height:1.45;color:var(--muted)}
+.ac-link{flex-wrap:wrap}
+.ac-link code{flex:1 1 160px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ac-done>div{min-width:0;display:grid;gap:2px}
+.ac-done small{line-height:1.45;overflow-wrap:anywhere}
+.ac-done.warn .ac-check{background:color-mix(in srgb,#f2b84b 18%,transparent);color:#f2b84b}
