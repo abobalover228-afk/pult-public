@@ -500,7 +500,7 @@ struct ChatView: View {
                 }
             }
             Section("Claude") {
-                Button((chat.target == "claude" ? "✓ " : "    ") + "Claude Code") { chat.target = "claude" }.disabled(!idle)
+                Button((chat.target == "claude" ? "✓ " : "    ") + "Claude Code") { chat.switchProvider("claude") }.disabled(!idle)
             }
             if !apiStore.connections.isEmpty {
                 Section("API") {
@@ -729,7 +729,7 @@ struct ChatView: View {
                     .onSubmit { submit() }
             }
             HStack(spacing: 6) {
-                Button { if idle { chat.target = chat.target == "claude" ? "codex" : "claude" } } label: {
+                Button { if idle { chat.switchProvider(chat.target == "claude" ? "codex" : "claude") } } label: {
                     HStack(spacing: 5) {
                         Group { if chat.isAPI { Image(systemName: "network").font(.system(size: 11.5)) } else { ProviderIcon(claude: chat.target == "claude") } }.frame(width: 16, height: 16)
                         Text(chat.isAPI ? "API" : chat.target == "claude" ? "Claude" : "Codex").font(uiSmall)
@@ -779,23 +779,30 @@ struct ChatView: View {
         let claude = chat.target == "claude"
         let input = claude ? chat.claudeInputTokens : chat.codexInputTokens
         let output = claude ? chat.claudeOutputTokens : chat.codexOutputTokens
-        let l = chat.limits[chat.account.home]
+        let tokens: String = "↑" + Self.short(input) + " ↓" + Self.short(output)
         return HStack(spacing: 10) {
             Button { chooseFolder() } label: {
                 Label(chat.cwd.replacingOccurrences(of: homeDir, with: "~"), systemImage: "folder").lineLimit(1).truncationMode(.middle)
             }.buttonStyle(.plain).help("Рабочая папка. Нажми — выбрать другую")
             if input != nil || output != nil {
-                Text("↑\(Self.short(input)) ↓\(Self.short(output))").help(claude ? "Токены последнего хода: вход / выход" : "Токены диалога: вход / выход")
+                Text(tokens).help(claude ? "Токены последнего хода: вход / выход" : "Токены диалога: вход / выход")
             }
             Spacer()
             if !chat.isAPI, !claude {
-                Text("5ч " + (l?.five.map { "\(Int(100 - $0))%" } ?? "?") + " · нед " + (l?.week.map { "\(Int(100 - $0))%" } ?? "?")).help("Сколько лимита осталось у «\(chat.account.name)»")
+                Text(limitsLeft).help("Сколько лимита осталось у «\(chat.account.name)»")
                 if chat.autoSwitch { Image(systemName: "arrow.left.arrow.right").help("Авто-переключение аккаунтов включено") }
             }
             if proxy.enabled { Text("VLESS").foregroundColor(proxy.status.hasPrefix("включён") ? .green : .orange).help(proxy.status) }
         }
         .font(.system(size: 10.5, design: .monospaced)).foregroundColor(.secondary)
         .padding(.horizontal, 20).padding(.bottom, 8)
+    }
+
+    // Отдельно от footer: в одном выражении SwiftUI компилятор не успевал вывести типы, и сборка падала.
+    var limitsLeft: String {
+        let limits = chat.limits[chat.account.home]
+        let left: (Double?) -> String = { value in value.map { "\(Int(100 - $0))%" } ?? "?" }
+        return "5ч " + left(limits?.five) + " · нед " + left(limits?.week)
     }
 
     static func short(_ n: Int?) -> String {
@@ -831,7 +838,7 @@ struct PaletteView: View {
         }
         all += [
             PaletteEntry(id: "new", icon: "square.and.pencil", title: "Новый чат", detail: "⌘N") { workspace.newChat() },
-            PaletteEntry(id: "provider", icon: "arrow.left.arrow.right", title: chat.target == "claude" ? "Переключить на Codex" : "Переключить на Claude", detail: "Кто отвечает в этом чате") { if !chat.busy { chat.target = chat.target == "claude" ? "codex" : "claude" } },
+            PaletteEntry(id: "provider", icon: "arrow.left.arrow.right", title: chat.target == "claude" ? "Переключить на Codex" : "Переключить на Claude", detail: "Кто отвечает в этом чате") { if !chat.busy { chat.switchProvider(chat.target == "claude" ? "codex" : "claude") } },
             PaletteEntry(id: "model", icon: "cpu", title: "Выбрать модель", detail: chat.modelLabel) { chat.ui.showModel = true },
             PaletteEntry(id: "settings", icon: "gearshape", title: "Настройки", detail: "Telegram, обновления, голос, VLESS") { chat.ui.showSettings = true },
             PaletteEntry(id: "bot", icon: "chart.line.uptrend.xyaxis", title: "Торговый бот", detail: "Состояние и выкладка") { chat.ui.showBot = true },

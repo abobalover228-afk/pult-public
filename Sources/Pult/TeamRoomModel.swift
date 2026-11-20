@@ -106,7 +106,10 @@ final class TeamRoomModel: ObservableObject {
         let key = "team.identity." + invite.room
         let id = UserDefaults.standard.string(forKey: key) ?? UUID().uuidString
         UserDefaults.standard.set(id, forKey: key)
-        let room = DirectRoom(invite, identity: id); self.room = room
+        let keyName = "team.peerKey." + invite.room
+        let peerKey = UserDefaults.standard.string(forKey: keyName) ?? (UUID().uuidString + UUID().uuidString).replacingOccurrences(of: "-", with: "")
+        UserDefaults.standard.set(peerKey, forKey: keyName)
+        let room = DirectRoom(invite, identity: id, peerKey: peerKey); self.room = room
         connected = true; invitation = invite.code; canonical = TeamBoard(); board = BoardSnapshot()
         pending = [:]; pendingClaims = false; publishing = []
         _ = Secrets.write("PULT_TEAM_INVITATION", invite.code)
@@ -409,7 +412,8 @@ final class TeamRoomModel: ObservableObject {
     private func deliverAgentMessages() {
         guard agentDialogue, connected, boardReady else { return }
         for (id, chat) in agentChats {
-            guard running.count < 3 else { break }
+            // Не больше трёх одновременно работающих агентов; считаем по живому статусу чатов, а не по записям running, которые могут устареть.
+            guard agentChats.values.filter({ $0.busy }).count < 3 else { break }
             guard let task = board.tasks.first(where: { $0.id == id }), task.ownerID == identity,
                   ![.done, .failed, .available].contains(task.status),
                   Workspace.shared.chats.contains(where: { $0 === chat }),

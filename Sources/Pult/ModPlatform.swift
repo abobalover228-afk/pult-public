@@ -14,7 +14,8 @@ enum ModPolicy {
     static func path(_ path: String, root: URL) throws -> URL {
         guard !path.hasPrefix("/"), !path.contains("\\"), path.utf8.count < 1000 else { throw ModError("Нужен относительный путь проекта") }
         let parts = path.split(separator: "/")
-        guard !parts.contains(where: { $0 == ".." || $0.hasPrefix(".env") || [".git", ".ssh", ".aws", "auth.json", "credentials", "id_rsa", "id_ed25519"].contains(String($0)) || ["pem", "key", "p12"].contains(($0 as NSString).pathExtension.lowercased()) }) else { throw ModError("Служебные файлы и секреты недоступны через файловый API") }
+        // Файловая система Mac не различает регистр: .GIT/config и .ENV — те же служебные файлы.
+        guard !parts.map({ $0.lowercased() }).contains(where: { $0 == ".." || $0.hasPrefix(".env") || [".git", ".ssh", ".aws", "auth.json", "credentials", "id_rsa", "id_ed25519"].contains($0) || ["pem", "key", "p12"].contains(($0 as NSString).pathExtension) }) else { throw ModError("Служебные файлы и секреты недоступны через файловый API") }
         let base = root.standardizedFileURL.resolvingSymlinksInPath()
         var target = base
         for part in parts where part != "." {

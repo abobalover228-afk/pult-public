@@ -28,7 +28,9 @@ enum ProjectGit {
         process.standardOutput = output; process.standardError = output; process.standardInput = stdin
         try process.run()
         let timeout = DispatchWorkItem { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 45, execute: timeout)
+        // Сетевым командам нужно больше 45 секунд: большой репозиторий клонируется минутами.
+        let network = ["clone", "fetch", "pull", "push", "ls-remote"].contains(arguments.first ?? "")
+        DispatchQueue.global().asyncAfter(deadline: .now() + (network ? 900 : 45), execute: timeout)
         process.waitUntilExit(); timeout.cancel()
         let data = try Data(contentsOf: outputURL)
         let result = Output(code: process.terminationStatus, text: String(decoding: data.prefix(2_000_000), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines), data: data)

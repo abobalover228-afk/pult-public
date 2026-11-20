@@ -163,43 +163,7 @@ struct CommandMap: View {
             }.padding(20)
             Divider()
             HStack(spacing: 0) {
-                GeometryReader { geometry in
-                    let width = geometry.size.width
-                    let height = geometry.size.height
-                    let center = CGPoint(x: width / 2, y: height / 2)
-                    let rx = max(120, width / 2 - 108)
-                    let ry = max(190, height / 2 - 68)
-                    ZStack {
-                        Path { path in
-                            for index in branches.indices {
-                                let angle = Double(index) * 2 * .pi / Double(branches.count) - .pi / 2
-                                let end = CGPoint(x: center.x + rx * cos(angle), y: center.y + ry * sin(angle))
-                                path.move(to: center)
-                                path.addCurve(to: end, control1: CGPoint(x: (center.x + end.x) / 2, y: center.y), control2: CGPoint(x: end.x, y: (center.y + end.y) / 2))
-                            }
-                        }.stroke(Color.secondary.opacity(0.25), lineWidth: 1.5)
-                        VStack(spacing: 8) {
-                            Image(systemName: "command").font(.system(size: 28))
-                            Text(state.provider == "codex" ? "GPT / Codex" : "Claude Code").font(.headline)
-                            Text("Что хочу сделать?").font(.caption).foregroundColor(.secondary)
-                        }.padding(18).background(RoundedRectangle(cornerRadius: 18).fill(Color.accentColor.opacity(0.12))).position(center)
-                        ForEach(Array(branches.enumerated()), id: \.element.0) { index, branch in
-                            let angle = Double(index) * 2 * .pi / Double(branches.count) - .pi / 2
-                            Button { state.category = branch.0; state.selected = nil; state.search = ""; state.mode = "commands" } label: {
-                                VStack(spacing: 6) {
-                                    Image(systemName: branch.2).font(.system(size: 19))
-                                    Text(branch.1).font(.system(size: 13, weight: .medium))
-                                    let count = RoadmapEntry.all.filter { $0.provider == state.provider && $0.category == branch.0 }.count
-                                    Text("\(count) команд").font(.caption2).foregroundColor(.secondary)
-                                }
-                                .frame(width: 145, height: 74)
-                                .background(RoundedRectangle(cornerRadius: 12).fill(state.category == branch.0 ? Color.accentColor.opacity(0.22) : Color(nsColor: .controlBackgroundColor)))
-                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(state.category == branch.0 ? Color.accentColor.opacity(0.6) : Color.secondary.opacity(0.15)))
-                            }.buttonStyle(.plain)
-                            .position(x: center.x + rx * cos(angle), y: center.y + ry * sin(angle))
-                        }
-                    }
-                }.frame(minWidth: 540)
+                GeometryReader { geometry in map(geometry.size) }.frame(minWidth: 540)
                 Divider()
                 VStack {
                     RoadmapView(state: state)
@@ -208,5 +172,48 @@ struct CommandMap: View {
             }
         }
         .onAppear { state.mode = "commands" }
+    }
+
+    // Карта собрана из отдельных частей: одним выражением SwiftUI компилятор не успевал вывести типы.
+    private func point(_ index: Int, _ size: CGSize) -> CGPoint {
+        let angle = CGFloat(index) * 2 * .pi / CGFloat(branches.count) - .pi / 2
+        let rx = max(120, size.width / 2 - 108), ry = max(190, size.height / 2 - 68)
+        return CGPoint(x: size.width / 2 + rx * cos(angle), y: size.height / 2 + ry * sin(angle))
+    }
+
+    private func map(_ size: CGSize) -> some View {
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        return ZStack {
+            Path { path in
+                for index in branches.indices {
+                    let end = point(index, size)
+                    path.move(to: center)
+                    path.addCurve(to: end, control1: CGPoint(x: (center.x + end.x) / 2, y: center.y), control2: CGPoint(x: end.x, y: (center.y + end.y) / 2))
+                }
+            }.stroke(Color.secondary.opacity(0.25), lineWidth: 1.5)
+            VStack(spacing: 8) {
+                Image(systemName: "command").font(.system(size: 28))
+                Text(state.provider == "codex" ? "GPT / Codex" : "Claude Code").font(.headline)
+                Text("Что хочу сделать?").font(.caption).foregroundColor(.secondary)
+            }.padding(18).background(RoundedRectangle(cornerRadius: 18).fill(Color.accentColor.opacity(0.12))).position(center)
+            ForEach(Array(branches.enumerated()), id: \.element.0) { index, branch in
+                branchButton(branch).position(point(index, size))
+            }
+        }
+    }
+
+    private func branchButton(_ branch: (String, String, String)) -> some View {
+        let selected = state.category == branch.0
+        let count = RoadmapEntry.all.filter { $0.provider == state.provider && $0.category == branch.0 }.count
+        return Button { state.category = branch.0; state.selected = nil; state.search = ""; state.mode = "commands" } label: {
+            VStack(spacing: 6) {
+                Image(systemName: branch.2).font(.system(size: 19))
+                Text(branch.1).font(.system(size: 13, weight: .medium))
+                Text("\(count) команд").font(.caption2).foregroundColor(.secondary)
+            }
+            .frame(width: 145, height: 74)
+            .background(RoundedRectangle(cornerRadius: 12).fill(selected ? Color.accentColor.opacity(0.22) : Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(selected ? Color.accentColor.opacity(0.6) : Color.secondary.opacity(0.15)))
+        }.buttonStyle(.plain)
     }
 }

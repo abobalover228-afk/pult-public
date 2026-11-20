@@ -63,7 +63,7 @@ final class Updater: ObservableObject {
         checking = true
         if manual { status = "Проверяю GitHub Releases…" }
         let expectedRemote = remote
-        var request = URLRequest(url: URL(string: "https://api.github.com/repos/" + repo + "/releases/latest")!)
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/" + repo + "/releases?per_page=30")!)
         request.timeoutInterval = 25
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         let session = http()
@@ -74,9 +74,14 @@ final class Updater: ObservableObject {
                 self.checking = false
                 guard self.remote == expectedRemote else { self.check(manual: manual); return }
                 guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200, let data = data,
-                      let release = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let tag = release["tag_name"] as? String else {
+                      let releases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
                     self.status = "Не удалось проверить релизы в " + repo; return
+                }
+                // «Последним» может быть релиз только для Windows: берём самый свежий, где есть Mac-архив.
+                guard let release = releases.first(where: { ($0["draft"] as? Bool) != true && ($0["prerelease"] as? Bool) != true
+                        && (($0["assets"] as? [[String: Any]]) ?? []).contains(where: { $0["name"] as? String == "Pult-macOS.zip" }) }),
+                      let tag = release["tag_name"] as? String else {
+                    self.status = "В " + repo + " нет релиза с архивом Pult-macOS.zip"; return
                 }
                 let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
                 guard Self.newer(version, than: self.version) else {
@@ -143,16 +148,31 @@ final class Updater: ObservableObject {
                 verify.arguments = ["--verify", "--deep", "--strict", app.path]
                 try verify.run(); verify.waitUntilExit()
                 guard verify.terminationStatus == 0 else { throw TeamRoomError("Подпись приложения не прошла проверку.") }
-                DispatchQueue.main.async { self?.replace(with: app) }
+                // «Лимиты» из того же архива ставим, только если это наш бандл с целой подписью.
+                var limits: URL?
+                if let bundle = Bundle(url: app.deletingLastPathComponent().appendingPathComponent("Лимиты.app")), bundle.bundleIdentifier == "local.pultpublic.limits" {
+                    let check = Process(); check.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+                    check.arguments = ["--verify", "--deep", "--strict", bundle.bundlePath]
+                    try check.run(); check.waitUntilExit()
+                    if check.terminationStatus == 0 { limits = bundle.bundleURL }
+                }
+                let verifiedLimits = limits
+                DispatchQueue.main.async { self?.replace(with: app, limits: verifiedLimits) }
             } catch { DispatchQueue.main.async { self?.working = false; self?.status = error.localizedDescription } }
         }.resume()
     }
-    private func replace(with candidate: URL) {
+    private func replace(with candidate: URL, limits: URL? = nil) {
         guard !Workspace.shared.anyBusy, !TeamRoomModel.shared.connected else { working = false; status = "Обновление отложено: началась работа."; return }
         let target = URL(fileURLWithPath: Bundle.main.bundlePath)
         do {
             guard FileManager.default.isWritableFile(atPath: target.deletingLastPathComponent().path) else { throw TeamRoomError("Нет прав на папку приложения. Перенеси Пульт в ~/Applications.") }
             _ = try Self.replaceBundle(at: target, with: candidate)
+            // «Лимиты» лежат рядом и выходят в том же архиве: без этого они навсегда остаются старыми.
+            let installedLimits = target.deletingLastPathComponent().appendingPathComponent("Лимиты.app")
+            if let limits = limits, FileManager.default.fileExists(atPath: installedLimits.path) {
+                NSRunningApplication.runningApplications(withBundleIdentifier: "local.pultpublic.limits").forEach { $0.terminate() }
+                _ = try? Self.replaceBundle(at: installedLimits, with: limits)
+            }
             working = false; available = 0; status = "Обновлено. Перезапускаю…"; relaunch()
         } catch { working = false; status = error.localizedDescription }
     }
