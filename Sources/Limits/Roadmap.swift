@@ -176,7 +176,7 @@ struct CommandMap: View {
 
     // Карта собрана из отдельных частей: одним выражением SwiftUI компилятор не успевал вывести типы.
     private func point(_ index: Int, _ size: CGSize) -> CGPoint {
-        let angle = Double(index) * 2 * .pi / Double(branches.count) - .pi / 2
+        let angle = CGFloat(index) * 2 * .pi / CGFloat(branches.count) - .pi / 2
         let rx = max(120, size.width / 2 - 108), ry = max(190, size.height / 2 - 68)
         return CGPoint(x: size.width / 2 + rx * cos(angle), y: size.height / 2 + ry * sin(angle))
     }
