@@ -185,6 +185,23 @@ test('API configuration joins provider picker and chat preserves local history',
 });
 
 
+test('switching provider keeps the dialog and hands its history to the new provider', async ({ page }) => {
+  await desktop(page);
+  const id = await page.evaluate(async () => {
+    const { ui } = await import('/core.js'); const c = ui.chats.current();
+    c.messages.push({ id: 'u1', kind: 'user', text: 'Вопрос Codex', done: true }, { id: 'a1', kind: 'agent', text: 'Ответ Codex', done: true });
+    return c.id;
+  });
+  await page.getByLabel('Провайдер').selectOption('claude');
+  await page.getByLabel('Сообщение').fill('Продолжи');
+  await page.getByRole('button', { name: 'Отправить ↑' }).click();
+  const request = await page.evaluate(() => window.calls.find(c => c.module === 'claude' && c.method === 'send').args);
+  expect(request.chat).toBe(id);
+  expect(request.text).toContain('Ответ Codex');
+  expect(request.text).toContain('Продолжи');
+  expect(await page.evaluate(async () => (await import('/core.js')).ui.chats.list().length)).toBe(1);
+});
+
 test('stopping while API attachments load prevents the HTTP request', async ({ page }) => {
   await desktop(page);
   await page.evaluate(async () => {
