@@ -7,7 +7,7 @@ async function controller(el) {
     el.replaceChildren(h('h2', {}, state.enabled ? '● Экраном управляет AI' : 'Управление экраном выключено'),
       h('p', {}, 'Computer use: снимки экрана, мышь и клавиатура. Включай для своей текущей задачи. Остановка блокирует следующие действия.'),
       button(state.enabled ? 'СТОП — отключить управление' : 'Разрешить управление этим сеансом', async () => { await call('computer', state.enabled ? 'stop' : 'enable'); await render(); }, state.enabled ? 'danger' : 'primary'),
-      !state.supported ? h('p.limit-error', {}, 'Нативное управление доступно в Windows-сборке.') : null);
+      !state.supported ? h('p.limit-error', {}, 'Нативное управление доступно в сборках для Windows и macOS.') : null);
   }
   await on('computer', render); await render();
 }
