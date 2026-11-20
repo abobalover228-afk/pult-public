@@ -68,7 +68,11 @@ pub async fn call(_app:&AppHandle,method:&str,a:Value)->Result<Value,String>{
  let value:Value=response.json().await.unwrap_or(Value::Null);if code!=200||value["ok"]!=true{return Err(format!("Это не сервер комнат Пульта (ответ {code})"));}
  return Ok(json!({"relay":value["mode"]=="relay","create":value["create"].as_str().unwrap_or("token")}));}
  if method=="saved"{let file=crate::util::data_dir().join("team/.env");let env=std::fs::read_to_string(file).unwrap_or_default();let code=env.lines().find_map(|l|l.strip_prefix("PULT_TEAM_INVITATION=")).and_then(|s|serde_json::from_str::<String>(s).ok());let identity=env.lines().find_map(|l|l.strip_prefix("PULT_TEAM_IDENTITY=")).and_then(|s|serde_json::from_str::<String>(s).ok());return Ok(json!({"code":code,"identity":identity}));}
- if method=="saveInvitation"{let code=a["code"].as_str().filter(|s|s.len()<4000).ok_or("Неверное приглашение")?;let file=crate::util::data_dir().join("team/.env");let env=std::fs::read_to_string(&file).unwrap_or_default();let text=format!("{}\nPULT_TEAM_INVITATION={}\n",env.lines().filter(|l|!l.starts_with("PULT_TEAM_INVITATION=")).collect::<Vec<_>>().join("\n"),serde_json::to_string(code).unwrap());crate::util::atomic_write(&file,text.as_bytes())?;return Ok(json!({"ok":true}));}
+ if method=="saveInvitation"{
+ let code=a["code"].as_str().filter(|s|s.len()<4000).ok_or("Неверное приглашение")?;env_set("PULT_TEAM_INVITATION",code)?;
+ // ID участника хранится и у вошедшего по приглашению: иначе после перезапуска его задачи становятся чужими.
+ if let Some(identity)=a["identity"].as_str(){uuid::Uuid::parse_str(identity).map_err(|_|"Неверный ID участника")?;env_set("PULT_TEAM_IDENTITY",identity)?;}
+ return Ok(json!({"ok":true}));}
  if method=="create"{
  use base64::Engine;let server=a["server"].as_str().ok_or("Нет сервера")?;let mut url=reqwest::Url::parse(server).map_err(|_|"Неверный сервер")?;if !(url.scheme()=="https"||(url.scheme()=="http"&&matches!(url.host_str(),Some("localhost"|"127.0.0.1"|"[::1]"))))||!url.username().is_empty()||url.password().is_some()||url.query().is_some()||url.fragment().is_some(){return Err("Неверный сервер".into());}url.set_path(&format!("{}/v1/rooms",url.path().trim_end_matches('/')));
  let file=crate::util::data_dir().join("team/.env");let env=std::fs::read_to_string(&file).unwrap_or_default();let token=env.lines().find_map(|l|l.strip_prefix("PULT_ROOM_CREATE_TOKEN=")).unwrap_or_default().trim_matches('"');
@@ -88,7 +92,7 @@ pub async fn call(_app:&AppHandle,method:&str,a:Value)->Result<Value,String>{
  let base=git(vec!["symbolic-ref".into(),"refs/remotes/origin/HEAD".into()],&folder).await?;
  let committed=git(vec!["diff".into(),"--name-only".into(),format!("{base}...HEAD")],&folder).await?;
  if committed.lines().any(secret_path){return Err("В коммитах найдены секретные/служебные файлы; push заблокирован".into());}
- let files=current["files"].as_array().ok_or("Нет списка файлов")?;
+ let files=current["pending"].as_array().ok_or("Нет списка файлов")?;
  if !files.is_empty(){let mut args=vec!["add".into(),"--".into()];args.extend(files.iter().filter_map(Value::as_str).map(str::to_string));git(args,&folder).await?;git(vec!["commit".into(),"-m".into(),a["title"].as_str().unwrap_or("Pult team task").chars().take(160).collect()],&folder).await?;}
  git(vec!["push".into(),"--set-upstream".into(),"origin".into(),branch.clone()],&folder).await?;
  let gh=crate::util::find_bin("gh").ok_or("Ветка отправлена. Для создания PR установи GitHub CLI и выполни gh auth login")?;
@@ -114,17 +118,49 @@ pub async fn call(_app:&AppHandle,method:&str,a:Value)->Result<Value,String>{
  let mut url=server;url.set_path(&format!("{}/v1/rooms/{room}/{action}",url.path().trim_end_matches('/')));if action=="events"{url.query_pairs_mut().append_pair("after",&a["cursor"].as_u64().unwrap_or(0).to_string());}
  let client=crate::util::http_builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(35)).build().map_err(|_|"Ошибка HTTP")?;
  let mut r=if action=="events"{client.get(url)}else{client.post(url).json(&a["body"])};
- r=r.bearer_auth(a["access"].as_str().ok_or("Нет доступа")?).header("X-Pult-Peer",a["identity"].as_str().ok_or("Нет идентичности")?);
+ r=r.bearer_auth(a["access"].as_str().ok_or("Нет доступа")?).header("X-Pult-Peer",a["identity"].as_str().ok_or("Нет идентичности")?).header("X-Pult-Peer-Key",peer_key()?);
  let mut response=r.send().await.map_err(|_|"Нет связи со службой знакомства")?;if !response.status().is_success(){return Err(format!("Служба знакомства: HTTP {}",response.status().as_u16()));}
- let mut bytes=vec![];while let Some(chunk)=response.chunk().await.map_err(|_|"Ответ оборвался")?{if bytes.len()+chunk.len()>1000000{return Err("Ответ слишком большой".into());}bytes.extend_from_slice(&chunk);}return serde_json::from_slice(&bytes).map_err(|_|"Неверный ответ службы".into());
+ let mut bytes=vec![];while let Some(chunk)=response.chunk().await.map_err(|_|"Ответ оборвался")?{if bytes.len()+chunk.len()>4_000_000{return Err("Ответ слишком большой".into());}bytes.extend_from_slice(&chunk);}return serde_json::from_slice(&bytes).map_err(|_|"Неверный ответ службы".into());
  }Err(format!("team.{method}: не реализовано"))
 }
+fn env_get(name:&str)->Option<String>{std::fs::read_to_string(crate::util::data_dir().join("team/.env")).ok()?.lines().find_map(|l|l.strip_prefix(&format!("{name}=")).and_then(|s|serde_json::from_str::<String>(s).ok()))}
+fn env_set(name:&str,value:&str)->Result<(),String>{
+ let _env=crate::util::ENV.lock().unwrap();let file=crate::util::data_dir().join("team/.env");let env=std::fs::read_to_string(&file).unwrap_or_default();
+ let text=format!("{}\n{name}={}\n",env.lines().filter(|l|!l.starts_with(&format!("{name}="))).collect::<Vec<_>>().join("\n"),serde_json::to_string(value).unwrap());
+ crate::util::atomic_write(&file,text.as_bytes())
+}
+/// Секрет этого компьютера для сервера комнат: без него никто другой не займёт наш ID участника.
+fn peer_key()->Result<String,String>{if let Some(key)=env_get("PULT_TEAM_PEER_KEY"){return Ok(key);}let key=format!("{}{}",uuid::Uuid::new_v4().simple(),uuid::Uuid::new_v4().simple());env_set("PULT_TEAM_PEER_KEY",&key)?;Ok(key)}
 fn secret_path(path:&str)->bool{path.to_ascii_lowercase().split('/').any(|p|p.starts_with(".env")||[".git",".ssh",".aws","auth.json","credentials"].contains(&p)||p.ends_with(".key")||p.ends_with(".pem")||p.ends_with(".p12"))}
 async fn preview(a:&Value)->Result<Value,String>{
- use sha2::{Digest,Sha256};let task=a["task"].as_str().ok_or("Нет задачи")?;uuid::Uuid::parse_str(task).map_err(|_|"Неверный ID задачи")?;let folder=crate::util::data_dir().join("Worktrees").join(task);let output=crate::util::command("git").args(["status","--porcelain=v1","-z","--untracked-files=all"]).current_dir(&folder).output().await.map_err(|_|"Git недоступен")?;if !output.status.success(){return Err("Нет worktree".into());}let status=String::from_utf8_lossy(&output.stdout);let mut files=vec![];for row in status.split('\0').filter(|r|!r.is_empty()){if row.len()<4{return Err("Неверный Git status".into());}let path=&row[3..];if row.starts_with('R')||row.starts_with(" R"){return Err("Переименование требует ручной проверки Git".into());}let lower=path.to_ascii_lowercase();if lower.split('/').any(|p|p.starts_with(".env")||[".git",".ssh",".aws","auth.json","credentials"].contains(&p)||p.ends_with(".key")||p.ends_with(".pem")||p.ends_with(".p12")){return Err("В изменениях найден секретный/служебный файл".into());}files.push(path.to_string());}files.sort();let mut hash=Sha256::new();hash.update(&output.stdout);let head=git(vec!["rev-parse".into(),"HEAD".into()],&folder).await?;hash.update(head.as_bytes());for path in &files{let p=folder.join(path);if p.exists(){let meta=std::fs::symlink_metadata(&p).map_err(|_|"Нет файла")?;if meta.file_type().is_symlink(){return Err("Символьная ссылка требует ручной проверки".into());}if meta.len()>32*1024*1024{return Err("Файл больше 32 МБ требует ручной проверки".into());}hash.update(path.as_bytes());hash.update([0]);hash.update(std::fs::read(p).map_err(|_|"Нет доступа к файлу")?);}}let mut new_files=String::new();for path in &files{let tracked=git(vec!["ls-files".into(),"--".into(),path.clone()],&folder).await?;if tracked.is_empty(){let bytes=std::fs::read(folder.join(path)).map_err(|_|"Не прочитать новый файл")?;if let Ok(content)=std::str::from_utf8(&bytes){new_files.push_str(&format!("\nНовый файл: {path}\n{}",content.chars().take(24000).collect::<String>()));}else{new_files.push_str(&format!("\nБинарный файл: {path}, {} байт",bytes.len()));}}}let diff=crate::util::command("git").args(["diff","--no-ext-diff","--no-textconv","HEAD"]).current_dir(&folder).output().await.map_err(|_|"Нет diff")?;Ok(json!({"files":files,"fingerprint":format!("{:x}",hash.finalize()),"diff":format!("{}{}",String::from_utf8_lossy(&diff.stdout).chars().take(160000).collect::<String>(),new_files)}))
+ let task=a["task"].as_str().ok_or("Нет задачи")?;uuid::Uuid::parse_str(task).map_err(|_|"Неверный ID задачи")?;
+ review(&crate::util::data_dir().join("Worktrees").join(task)).await
+}
+async fn review(folder:&std::path::Path)->Result<Value,String>{
+ use sha2::{Digest,Sha256};
+ let output=crate::util::git().args(["status","--porcelain=v1","-z","--untracked-files=all"]).current_dir(&folder).output().await.map_err(|_|"Git недоступен")?;
+ if !output.status.success(){return Err("Нет worktree".into());}
+ let mut pending=vec![];
+ for row in String::from_utf8_lossy(&output.stdout).split('\0').filter(|r|!r.is_empty()){
+  if row.len()<4{return Err("Неверный Git status".into());}
+  if row.starts_with('R')||row.starts_with(" R"){return Err("Переименование требует ручной проверки Git".into());}
+  pending.push(row[3..].to_string());
+ }
+ // Коммиты агента тоже уйдут в push: показываем всё от основы ветки, а не только незакоммиченное.
+ let origin=git(vec!["symbolic-ref".into(),"refs/remotes/origin/HEAD".into()],&folder).await?;
+ let base=git(vec!["merge-base".into(),origin,"HEAD".into()],&folder).await?;
+ let committed=git(vec!["diff".into(),"--name-only".into(),"--no-renames".into(),format!("{base}..HEAD")],&folder).await?;
+ let mut files:Vec<String>=pending.iter().cloned().chain(committed.lines().map(str::to_string)).collect();files.sort();files.dedup();
+ if files.iter().any(|f|secret_path(f)){return Err("В изменениях найден секретный/служебный файл".into());}
+ let mut hash=Sha256::new();hash.update(&output.stdout);hash.update(git(vec!["rev-parse".into(),"HEAD".into()],&folder).await?.as_bytes());
+ for path in &files{let p=folder.join(path);if p.exists(){let meta=std::fs::symlink_metadata(&p).map_err(|_|"Нет файла")?;if meta.file_type().is_symlink(){return Err("Символьная ссылка требует ручной проверки".into());}if meta.len()>32*1024*1024{return Err("Файл больше 32 МБ требует ручной проверки".into());}hash.update(path.as_bytes());hash.update([0]);hash.update(std::fs::read(p).map_err(|_|"Нет доступа к файлу")?);}}
+ let mut new_files=String::new();
+ for path in &pending{if git(vec!["ls-files".into(),"--".into(),path.clone()],&folder).await?.is_empty(){let bytes=std::fs::read(folder.join(path)).map_err(|_|"Не прочитать новый файл")?;if let Ok(content)=std::str::from_utf8(&bytes){new_files.push_str(&format!("\nНовый файл: {path}\n{}",content.chars().take(24000).collect::<String>()));}else{new_files.push_str(&format!("\nБинарный файл: {path}, {} байт",bytes.len()));}}}
+ let diff=crate::util::git().args(["diff","--no-ext-diff","--no-textconv",&base]).current_dir(&folder).output().await.map_err(|_|"Нет diff")?;
+ Ok(json!({"files":files,"pending":pending,"fingerprint":format!("{:x}",hash.finalize()),"diff":format!("{}{}",String::from_utf8_lossy(&diff.stdout).chars().take(160000).collect::<String>(),new_files)}))
 }
 async fn git(args:Vec<String>,dir:&std::path::Path)->Result<String,String>{
- let out=tokio::time::timeout(std::time::Duration::from_secs(120),crate::util::command("git").args(args).current_dir(dir).kill_on_drop(true).output()).await.map_err(|_|"Git не ответил за 120 секунд")?.map_err(|_|"Git недоступен")?;
+ let out=tokio::time::timeout(std::time::Duration::from_secs(120),crate::util::git().args(args).current_dir(dir).kill_on_drop(true).output()).await.map_err(|_|"Git не ответил за 120 секунд")?.map_err(|_|"Git недоступен")?;
  if !out.status.success(){return Err("Ошибка Git; рабочие файлы сохранены".into());}Ok(String::from_utf8_lossy(&out.stdout).trim().into())
 }
 async fn prepare(remote:&str,root:&std::path::Path,work:&std::path::Path,task:&str)->Result<Value,String>{
@@ -133,7 +169,14 @@ async fn prepare(remote:&str,root:&std::path::Path,work:&std::path::Path,task:&s
  let actual_remote=git(vec!["remote".into(),"get-url".into(),"origin".into()],root).await?;
  let matches=match(slug(remote),slug(&actual_remote)){(Some(a),Some(b))=>a.eq_ignore_ascii_case(&b),_=>remote==actual_remote};
  if !matches{return Err("Origin отличается от проекта комнаты".into());}
- if !work.exists(){git(vec!["fetch".into(),"origin".into()],root).await?;std::fs::create_dir_all(work.parent().ok_or("Нет каталога")?).map_err(|_|"Не создать каталог")?;git(vec!["worktree".into(),"add".into(),"-b".into(),branch.clone(),work.to_string_lossy().into(),"FETCH_HEAD".into()],root).await?;}
+ if !work.exists(){
+  git(vec!["fetch".into(),"origin".into()],root).await?;git(vec!["worktree".into(),"prune".into()],root).await?;
+  std::fs::create_dir_all(work.parent().ok_or("Нет каталога")?).map_err(|_|"Не создать каталог")?;
+  // Ветка могла остаться от прошлого запуска: подключаем её, а не создаём заново.
+  let exists=git(vec!["rev-parse".into(),"--verify".into(),"--quiet".into(),format!("refs/heads/{branch}")],root).await.is_ok();
+  let path=work.to_string_lossy().to_string();
+  git(if exists{vec!["worktree".into(),"add".into(),path,branch.clone()]}else{vec!["worktree".into(),"add".into(),"-b".into(),branch.clone(),path,"FETCH_HEAD".into()]},root).await?;
+ }
  if git(vec!["branch".into(),"--show-current".into()],work).await?!=branch{return Err("Ветка worktree отличается от задачи".into());}
  let common=git(vec!["rev-parse".into(),"--path-format=absolute".into(),"--git-common-dir".into()],work).await?;
  let expected=git(vec!["rev-parse".into(),"--path-format=absolute".into(),"--git-common-dir".into()],root).await?;
@@ -171,6 +214,9 @@ fn req(action:&str)->Value{json!({"id":uuid::Uuid::new_v4().to_string(),"action"
  let root=dir.join("project");let work=dir.join("work");let task=uuid::Uuid::new_v4().to_string();let remote=bare.to_str().unwrap();
  prepare(remote,&root,&work,&task).await.unwrap();std::fs::write(work.join("hello.txt"),"changed").unwrap();assert_eq!(std::fs::read_to_string(root.join("hello.txt")).unwrap(),"original");
  prepare(remote,&root,&work,&task).await.unwrap();assert!(prepare("wrong-origin",&root,&work,&task).await.is_err());
+ for args in [vec!["config","user.name","Test"],vec!["config","user.email","test@example.test"],vec!["commit","-am","agent"]]{git(args.into_iter().map(str::to_string).collect(),&work).await.unwrap();}
+ let seen=review(&work).await.unwrap();assert_eq!(seen["files"],json!(["hello.txt"]));assert_eq!(seen["pending"],json!([]));assert!(seen["diff"].as_str().unwrap().contains("+changed"));
+ std::fs::remove_dir_all(&work).unwrap();prepare(remote,&root,&work,&task).await.unwrap();assert_eq!(std::fs::read_to_string(work.join("hello.txt")).unwrap(),"changed");
  std::fs::remove_dir_all(dir).unwrap();
  }
 }

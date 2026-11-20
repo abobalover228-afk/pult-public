@@ -31,17 +31,20 @@ async function deliverRelay() {
 async function persistOutbox() { if (room) await call('team', 'outbox', { room: room.invite.room, save: true, rows: outbox }); }
 function flushOutbox() { if (room) for (const request of outbox) room.event({ request }, room.invite.coordinator); }
 
+// Сами запускаем только задачи, взятые в этом сеансе. После перезапуска Пульта — кнопкой «Продолжить», без дублей промпта.
+const claimed = new Set();
 async function launchAssigned() {
   if (!room || !boardReady) return;
-  for (const t of board.tasks.filter(t => t.ownerID === identity && t.status === 'working' && !running.has(t.id))) {
-    running.set(t.id, null); redraw();
-    try {
-      const project = await call('team', 'prepare', { repository: board.repository, task: t.id });
-      const chat = ui.chats.open({ title: t.title, cwd: project.cwd, teamTask: t.id, select: false }); running.set(t.id, chat);
-      await ui.chats.send(`Общая задача: ${t.title}\n${t.detail}\nРаботай в выделенной ветке. Не пушь и не создавай PR без подтверждения пользователя.`, { chat, literal: true });
-    } catch (error) { running.delete(t.id); await operation('update', { task: { ...t, status: 'failed', result: String(error).slice(0, 8000) } }); }
-    redraw();
-  }
+  for (const t of board.tasks.filter(t => t.ownerID === identity && t.status === 'working' && claimed.has(t.id) && !running.has(t.id))) await launch(t);
+}
+async function launch(t) {
+  claimed.delete(t.id); running.set(t.id, null); redraw();
+  try {
+    const project = await call('team', 'prepare', { repository: board.repository, task: t.id });
+    const chat = ui.chats.open({ title: t.title, cwd: project.cwd, teamTask: t.id, select: false }); running.set(t.id, chat);
+    await ui.chats.send(`Общая задача: ${t.title}\n${t.detail}\nРаботай в выделенной ветке. Не пушь и не создавай PR без подтверждения пользователя.`, { chat, literal: true });
+  } catch (error) { running.delete(t.id); await operation('update', { task: { ...t, status: 'failed', result: String(error).slice(0, 8000) } }); }
+  redraw();
 }
 
 await ui.ready;
@@ -82,6 +85,7 @@ async function envelope(sender, e) {
 async function operation(action, extra = {}) {
   if (!room || room.closed) throw Error('Сначала войди в комнату');
   const request = { id: crypto.randomUUID().toUpperCase(), action, ids: [], name, ...extra };
+  if (action === 'claim') for (const id of request.ids) claimed.add(id);
   if (identity === room.invite.coordinator) await envelope(identity, { request });
   else {
     if (action === 'update') { outbox.push(request); await persistOutbox(); }
@@ -102,7 +106,7 @@ async function enter(code) {
     if (room) await room.stop();
     board = { revision: 0, tasks: [], repository: '' }; boardReady = false; running.clear(); peers = 0;
     if (!name || name.length > 80) throw Error('Сначала впиши своё имя — до 80 символов');
-    const parsed = invitation(code.trim()); savedInvitation = code.trim(); await call('team', 'saveInvitation', { code: savedInvitation });
+    const parsed = invitation(code.trim()); savedInvitation = code.trim(); await call('team', 'saveInvitation', { code: savedInvitation, identity });
     room = new DirectRoom(parsed, identity, {
       status: s => { status = s; paintStatus(); },
       peers: n => { if (n !== peers) { peers = n; if (!n) status = 'Кент отключился. Ждём, пока вернётся.'; redraw(); } },
@@ -322,6 +326,7 @@ function card(t) {
   if (t.status === 'available') actions.push(act('Взять в работу', () => operation('claim', { ids: [t.id] }), '.primary.small' + (canClaim ? '' : '.off')));
   if (mine && preparing) actions.push(h('span.duo-chip', {}, 'Готовлю папку…'));
   if (mine && chat) actions.push(act('Открыть агента', () => ui.chats.activate(chat.id), '.primary.small'));
+  if (mine && !running.has(t.id) && ['working', 'failed'].includes(t.status)) actions.push(act('Продолжить', () => launch(t).catch(ui.toast), '.small'));
   if (mine && ['review', 'failed', 'needsAnswer'].includes(t.status)) {
     actions.push(act('Изменения', async () => { const preview = await call('team', 'preview', { task: t.id }); ui.chats.note(`Изменения задачи «${t.title}»:\n${preview.diff}\n${preview.files.join('\n')}`); }, '.small'));
     if (t.status === 'review' && !t.pullRequest) actions.push(act('Создать PR', () => publish(t), '.small'));
