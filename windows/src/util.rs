@@ -44,6 +44,26 @@ pub fn command(bin: impl AsRef<Path>) -> tokio::process::Command {
     c
 }
 
+/// Git без хуков, fsmonitor и ext-протокола репозитория и без интерактивных запросов пароля.
+pub fn git() -> tokio::process::Command {
+    let hooks = data_dir().join("git-no-hooks");
+    let _ = std::fs::create_dir_all(&hooks);
+    let mut c = command("git");
+    c.arg("-c").arg(format!("core.hooksPath={}", hooks.display()))
+        .args(["-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never"])
+        .env("GIT_TERMINAL_PROMPT", "0");
+    c
+}
+
+/// Склеивает поток байтов в UTF-8 без разрыва многобайтовых символов на границе чтения.
+pub fn utf8_chunk(pending: &mut Vec<u8>, bytes: &[u8]) -> String {
+    pending.extend_from_slice(bytes);
+    let valid = match std::str::from_utf8(pending) { Ok(_) => pending.len(), Err(e) if e.error_len().is_none() => e.valid_up_to(), Err(_) => pending.len() };
+    let text = String::from_utf8_lossy(&pending[..valid]).into_owned();
+    pending.drain(..valid);
+    text
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Account {
     pub name: String,
@@ -172,6 +192,14 @@ impl ProcessGenerations {
 #[cfg(test)]
 mod generation_tests {
     use super::*;
+    #[test]
+    fn utf8_chunks_keep_split_cyrillic_letters_whole() {
+        let bytes = "Привет".as_bytes(); let mut pending = vec![];
+        let first = utf8_chunk(&mut pending, &bytes[..3]);
+        assert_eq!(first, "П"); assert_eq!(pending.len(), 1);
+        assert_eq!(first + &utf8_chunk(&mut pending, &bytes[3..]), "Привет"); assert!(pending.is_empty());
+        assert_eq!(utf8_chunk(&mut pending, b"\xff ok"), "\u{fffd} ok");
+    }
     #[test]
     fn cancelled_start_cannot_register_a_process_after_stop() {
         use std::sync::{Arc,Barrier};

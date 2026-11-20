@@ -168,7 +168,7 @@ async fn sdk(a: &Value) -> Result<Value, String> {
             use std::io::Read; let mut bytes=vec![]; std::fs::File::open(path).map_err(|_| "Файл недоступен")?.take(1048577).read_to_end(&mut bytes).map_err(|_| "Ошибка чтения")?;
             if bytes.len()>1048576 { return Err("Файл больше 1 МБ".into()); } Ok(json!(String::from_utf8(bytes).map_err(|_| "Файл не UTF-8")?))
         }
-        "git.status" | "git.diff" => { let mut cmd=util::command("git"); cmd.current_dir(&root).args(if method=="git.status" { vec!["status","--short"] } else { vec!["diff","--stat"] }).kill_on_drop(true); let out=tokio::time::timeout(Duration::from_secs(15),cmd.output()).await.map_err(|_| "Git не ответил")?.map_err(|_| "Git недоступен")?; if !out.status.success() { return Err("Ошибка Git в папке проекта".into()); } Ok(json!(String::from_utf8_lossy(&out.stdout).chars().take(100000).collect::<String>())) }
+        "git.status" | "git.diff" => { let mut cmd=util::git(); cmd.current_dir(&root).args(if method=="git.status" { vec!["status","--short"] } else { vec!["diff","--stat"] }).kill_on_drop(true); let out=tokio::time::timeout(Duration::from_secs(15),cmd.output()).await.map_err(|_| "Git не ответил")?.map_err(|_| "Git недоступен")?; if !out.status.success() { return Err("Ошибка Git в папке проекта".into()); } Ok(json!(String::from_utf8_lossy(&out.stdout).chars().take(100000).collect::<String>())) }
         "network.fetch" => network(&v,p).await,
         "process.start" | "process.read" | "process.stop" => process(&v,p,method,&root),
         "chats.create" => {

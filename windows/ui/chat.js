@@ -2,6 +2,7 @@ import { call, on, ui, h, settings } from './core.js';
 import { markdown, basename, button, localFileTarget, icon, iconButton, rings } from './render.js';
 const chats = [], events = new EventTarget(), previews = new Map();
 const isImage = path => /\.(png|jpe?g|gif|webp|bmp)$/i.test(path);
+const transcript = messages => messages.filter(m => ['user', 'agent'].includes(m.kind)).map(m => `${m.kind}: ${m.text}`).join('\n\n');
 let active, accounts = [], info, prefs = {}, history = [], query = '', follow = true, showingTrash = false;
 const app = document.querySelector('#app'), threadList = h('div.thread-list'), tabs = h('div.tabs'), feed = h('div.feed');
 const title = h('strong', {}, 'Новый диалог'), status = h('span.status', {}, 'Готов');
@@ -355,7 +356,7 @@ async function prepareRules(c, rules, previous, epoch) {
   if (c.epoch !== epoch) return;
   c.connected = false; c.loaded = false; c.claudeStarted = false; c.thread = null; c.session = null; c.forkSession = false;
   c.localId = crypto.randomUUID(); c.turnMarks = []; c.queuePaused = true;
-  c.seed = previous.filter(m => ['user', 'agent'].includes(m.kind)).map(m => `${m.kind}: ${m.text}`).join('\n\n');
+  c.seed = transcript(previous);
   c.appliedRules = rules; add(c, 'note', 'Новые правила применяются в отдельном контексте. Предыдущее продолжение сохранено в истории.');
 }
 async function saveConversation(c) {
@@ -487,9 +488,16 @@ function renderHistory() {
   }).flat());
 }
 accountSelect.onchange = () => ui.chats.switchAccount(active, accountSelect.value).catch(e => { header(); ui.toast(String(e)); });
-provider.onchange = () => {
-  if (active.busy) { provider.value = active.target; ui.toast('Сначала останови текущий ход'); return; }
-  open({ target: provider.value, cwd: active.cwd, model: ui.providers.find(p => p.id === provider.value)?.model || '' });
+// Тот же диалог, другой провайдер: старый процесс останавливаем, история уходит новому провайдеру как контекст.
+provider.onchange = async () => {
+  const c = active, target = provider.value;
+  if (c.busy) { provider.value = c.target; ui.toast('Сначала останови текущий ход'); return; }
+  try {
+    if (['codex', 'claude'].includes(c.target)) await ui.chats.restart(c);
+    Object.assign(c, { target, model: ui.providers.find(p => p.id === target)?.model || prefs[target + 'Model'] || '', effort: prefs[target + 'Effort'] || '',
+      permissionMode: 'default', thread: null, session: null, forkSession: false, turnMarks: [], seed: target.startsWith('api:') ? null : transcript(c.messages) || null });
+    header(); await saveConversation(c);
+  } catch (e) { provider.value = c.target; ui.toast(String(e)); }
 };
 function renderSuggestions() {
   const prefix = /^\/(\S*)$/.exec(composer.value);
@@ -597,7 +605,7 @@ ui.chats.edit = async (c, id, text, attachments = []) => {
   const messages = c.messages.slice(0,index).filter(m => ['user','agent','note'].includes(m.kind)).map(m => ({...m, id:crypto.randomUUID()}));
   const fork = open({target:c.target,cwd:c.cwd,account:c.account,model:c.model,effort:c.effort,fast:!!c.fast,sandbox:c.sandbox,extraDirs:[...(c.extraDirs||[])],permissionMode:c.permissionMode,rulesOverride:c.rulesOverride,
     title:`${c.title} · правка`,messages,localId:crypto.randomUUID()});
-  if (!c.target.startsWith('api:')) fork.seed = messages.filter(m => ['user','agent'].includes(m.kind)).map(m => `${m.kind}: ${m.text}`).join('\n\n');
+  if (!c.target.startsWith('api:')) fork.seed = transcript(messages);
   await saveConversation(fork); await send(text,{chat:fork,literal:true,attachments}); return fork;
 };
 ui.chats.rules = c => effectiveRules(c);

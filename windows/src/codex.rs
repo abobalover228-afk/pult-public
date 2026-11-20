@@ -291,6 +291,14 @@ fn open(a: &Value) -> Result<Value, String> {
                 return Ok(Value::Null);
             }
         }
+        // Программы и скрипты из ссылок агента не запускаем — только показываем в Finder/Проводнике.
+        if runnable(&p) {
+            #[cfg(windows)]
+            let r = util::command("explorer").raw_arg(format!("/select,\"{}\"", p.display())).spawn();
+            #[cfg(not(windows))]
+            let r = util::command(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).args(if cfg!(target_os = "macos") { vec!["-R".into(), p.clone().into_os_string()] } else { vec![p.parent().unwrap_or(&p).as_os_str().to_owned()] }).spawn();
+            return r.map(|_| Value::Null).map_err(|e| e.to_string());
+        }
         target = p.to_string_lossy().to_string();
     }
     #[cfg(windows)]
@@ -298,6 +306,17 @@ fn open(a: &Value) -> Result<Value, String> {
     #[cfg(not(windows))]
     let r = util::command(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }).arg(&target).spawn();
     r.map(|_| Value::Null).map_err(|e| e.to_string())
+}
+
+fn runnable(p: &Path) -> bool {
+    const EXT: &[&str] = &["app", "command", "tool", "sh", "zsh", "bash", "terminal", "workflow", "scpt", "applescript", "pkg", "mpkg", "dmg", "jar", "fileloc", "webloc", "inetloc",
+        "exe", "com", "bat", "cmd", "ps1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msc", "lnk", "scr", "url", "hta", "cpl", "reg"];
+    let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    #[cfg(unix)]
+    let exec = { use std::os::unix::fs::PermissionsExt; p.is_file() && p.metadata().is_ok_and(|m| m.permissions().mode() & 0o111 != 0) };
+    #[cfg(not(unix))]
+    let exec = false;
+    EXT.contains(&ext.as_str()) || exec
 }
 
 /// Команда в новом окне терминала (вход в аккаунт, полноценный CLI).
@@ -352,12 +371,16 @@ async fn shell(app: &AppHandle, a: &Value) -> Result<Value, String> {
     let pipe = |mut r: Box<dyn tokio::io::AsyncRead + Unpin + Send>| {
         let (app, chat, id) = (app.clone(), chat.clone(), a["id"].clone());
         tokio::spawn(async move {
-            let mut buf = [0u8; 8192];
+            let (mut buf, mut pending) = ([0u8; 8192], Vec::new());
             while let Ok(n) = r.read(&mut buf).await {
+                // На EOF выдаём хвост, даже если он не дописан до целого символа.
+                let delta = if n == 0 { String::from_utf8_lossy(&std::mem::take(&mut pending)).into_owned() } else { util::utf8_chunk(&mut pending, &buf[..n]) };
+                if !delta.is_empty() {
+                    let _ = app.emit("codex", json!({ "chat": chat, "cli": id, "delta": delta }));
+                }
                 if n == 0 {
                     break;
                 }
-                let _ = app.emit("codex", json!({ "chat": chat, "cli": id, "delta": String::from_utf8_lossy(&buf[..n]) }));
             }
         })
     };
