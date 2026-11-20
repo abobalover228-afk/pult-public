@@ -112,7 +112,7 @@ ui.closePanel = id => { if (!id) { panel.close(); return; } const item = mounted
 function refreshExtensions() {
   provider.replaceChildren(...[{ id: 'codex', title: 'Codex' }, { id: 'claude', title: 'Claude' }, ...ui.providers].map(p => h('option', { value: p.id }, p.title)));
   if (active) provider.value = active.target;
-  nav.replaceChildren(...ui.sidebar.filter(b=>!['api','telegram','support'].includes(b.id)).map(b => iconButton(b.id==='team'?'people':b.id==='mods'?'cpu':'folder',`${b.icon || ''} ${b.title}`.trim(),b.open,b.title)));
+  nav.replaceChildren(...ui.sidebar.filter(b=>!['api','telegram','support'].includes(b.id)).map(b => iconButton(b.id==='team'?'people':b.id==='mods'?'cpu':b.id==='conveyor'?'conveyor':'folder',`${b.icon || ''} ${b.title}`.trim(),b.open,b.title)));
   settingsButton.title='Настройки · Telegram, голос, обновления и подключения';
   extensions.replaceChildren(...ui.composer.map(b => iconButton(b.id==='voice'?'mic':b.id==='coach'?'wand':'cpu',b.icon || b.title,()=>b.run(active))));
   statusbar.replaceChildren(...ui.statusbar.map(b => button(b.icon || b.title, () => b.run(active))));

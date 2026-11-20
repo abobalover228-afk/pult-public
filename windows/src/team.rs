@@ -131,7 +131,7 @@ fn env_set(name:&str,value:&str)->Result<(),String>{
 }
 /// Секрет этого компьютера для сервера комнат: без него никто другой не займёт наш ID участника.
 fn peer_key()->Result<String,String>{if let Some(key)=env_get("PULT_TEAM_PEER_KEY"){return Ok(key);}let key=format!("{}{}",uuid::Uuid::new_v4().simple(),uuid::Uuid::new_v4().simple());env_set("PULT_TEAM_PEER_KEY",&key)?;Ok(key)}
-fn secret_path(path:&str)->bool{path.to_ascii_lowercase().split('/').any(|p|p.starts_with(".env")||[".git",".ssh",".aws","auth.json","credentials"].contains(&p)||p.ends_with(".key")||p.ends_with(".pem")||p.ends_with(".p12"))}
+pub(crate) fn secret_path(path:&str)->bool{path.to_ascii_lowercase().split('/').any(|p|p.starts_with(".env")||[".git",".ssh",".aws","auth.json","credentials"].contains(&p)||p.ends_with(".key")||p.ends_with(".pem")||p.ends_with(".p12"))}
 async fn preview(a:&Value)->Result<Value,String>{
  let task=a["task"].as_str().ok_or("Нет задачи")?;uuid::Uuid::parse_str(task).map_err(|_|"Неверный ID задачи")?;
  review(&crate::util::data_dir().join("Worktrees").join(task)).await
