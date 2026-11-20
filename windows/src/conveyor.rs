@@ -195,9 +195,9 @@ mod tests {
         let err = call_test("merge", with(&t2)).await.unwrap_err(); assert!(err.contains("Конфликт слияния: a.txt"), "{err}");
         let w = call_test("task", with(&t1)).await.unwrap(); std::fs::write(PathBuf::from(w["cwd"].as_str().unwrap()).join(".env"), "SECRET=1").unwrap();
         assert!(call_test("diff", with(&t1)).await.unwrap_err().contains(".env"));
-        let ran = call_test("run", json!({ "epic": epic, "command": "cat a.txt" })).await.unwrap(); assert_eq!(ran["output"], "from one\n");
+        let ran = call_test("run", json!({ "epic": epic, "command": if cfg!(windows) { "type a.txt" } else { "cat a.txt" } })).await.unwrap(); assert_eq!(ran["output"].as_str().unwrap().trim_end(), "from one");
         call_test("finish", json!({ "cwd": repo, "epic": epic, "base": "main" })).await.unwrap();
-        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "from one\n");
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap().trim_end(), "from one");
         call_test("cleanup", base).await.unwrap(); assert!(!dir(&epic.to_ascii_lowercase()).exists());
         let _ = std::fs::remove_dir_all(tmp);
     }
