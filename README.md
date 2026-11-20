@@ -8,7 +8,7 @@
 
 Нативный клиент macOS 14+ для Codex и Claude: параллельные чаты, Telegram, голос и командная работа.
 
-Скачать: [последний релиз](https://github.com/abobalover228-afk/pult-public/releases/latest). Распакуй архив и перенеси приложения в `~/Applications`. Сборка arm64, подпись ad-hoc.
+Скачать: [релизы](https://github.com/abobalover228-afk/pult-public/releases) — для Mac бери `Pult-macOS.zip` из самого свежего релиза, где он есть. Распакуй архив и перенеси приложения в `~/Applications`. Сборка arm64, подпись ad-hoc.
 
 ## Новое в 2.3
 

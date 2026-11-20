@@ -50,7 +50,7 @@ import WebKit
         _ = try invoke(mod.id, "files.write", ["path": "hello.txt", "text": "hello"])
         try check(try invoke(mod.id, "files.read", ["path": "hello.txt"]) as? String == "hello")
         try FileManager.default.createSymbolicLink(at: project.appendingPathComponent("escape"), withDestinationURL: outside)
-        for path in ["../outside/test", "escape/test", ".env", ".git/config", "auth.json"] {
+        for path in ["../outside/test", "escape/test", ".env", ".git/config", "auth.json", ".ENV", ".GiT/config", "Auth.JSON"] {
             reject { try invoke(mod.id, "files.write", ["path": path, "text": "must not write"]) }
         }
         let first = try invoke(mod.id, "chats.create", ["title": "one"]) as! JSON

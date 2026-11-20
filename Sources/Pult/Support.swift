@@ -92,13 +92,17 @@ final class BotStatus: ObservableObject {
     }
 
     private var pollFailures = 0
-    func pollDeploy(_ id: String) {
+    private var deployPolling = false     // одна цепочка опроса, сколько бы раз ни открыли панель
+    func pollDeploy(_ id: String, next: Bool = false) {
+        guard next || !deployPolling else { return }
+        deployPolling = true
         Remote.run("python3 /usr/local/lib/coder-chat/deploy_ctl.py log \(id)") { [weak self] out in
             guard let self = self else { return }
+            self.deployPolling = false
             guard let d = out?.data(using: .utf8), let j = (try? JSONSerialization.jsonObject(with: d)) as? JSON else {
                 // Сеть моргнула: пробуем ещё, а не бросаем выкладку в состоянии «идёт».
                 self.pollFailures += 1
-                if self.deployActive, self.pollFailures <= 20 { DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.pollDeploy(id) } }
+                if self.deployActive, self.pollFailures <= 20 { self.deployPolling = true; DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.pollDeploy(id, next: true) } }
                 else if self.deployActive {
                     self.deployActive = false
                     self.deployLines.append("Связь с сервером потеряна — результат выкладки неизвестен. Открой панель позже.")
@@ -110,7 +114,7 @@ final class BotStatus: ObservableObject {
             self.deployLines = (j["lines"] as? [String]) ?? []
             let wasActive = self.deployActive
             self.deployActive = (j["active"] as? Bool) ?? false
-            if self.deployActive { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.pollDeploy(id) } }
+            if self.deployActive { self.deployPolling = true; DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.pollDeploy(id, next: true) } }
             else if wasActive {
                 let res = self.deployLines.last { $0.hasPrefix("RESULT") } ?? "RESULT ?"
                 notifyMac("Выкладка", res.contains("deployed") ? "✅ Выложено, бот работает" : res.contains("rolled_back") ? "↩️ Не вышло — откатил" : "❌ Не выложено")

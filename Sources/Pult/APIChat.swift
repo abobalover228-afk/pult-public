@@ -13,7 +13,15 @@ extension Chat {
     }
     func chooseCodex(_ index: Int) {
         guard !busy, !nativeCLIIsRunning else { return }
-        target = "codex"; switchTo(index)
+        switchProvider("codex"); switchTo(index)
+    }
+    /// Тот же диалог у другого CLI-провайдера: новый получает историю как контекст, а не начинает с нуля.
+    func switchProvider(_ next: String) {
+        guard next != target else { return }
+        target = next
+        guard !items.isEmpty, !isAPI else { return }
+        freshContextSeed = PromptSnapshot.history(items); freshContextImages = items.flatMap(\.images)
+        detachThreadForBranch(); claudeIsolatedSession = UUID().uuidString.lowercased()
     }
     func apiConfigurationDidChange() {
         guard isAPI else { return }
