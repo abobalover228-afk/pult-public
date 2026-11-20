@@ -20,10 +20,12 @@ class SignalingChecks(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
 
-    def request(self, path, body=None, room=None, peer="A" * 24, token=None):
+    def request(self, path, body=None, room=None, peer="A" * 24, token=None, key=None):
         headers = {}
         if room:
             headers = {"Authorization": "Bearer " + (token or room["access"]), "X-Pult-Peer": peer}
+            if key:
+                headers["X-Pult-Peer-Key"] = key
             path = "/v1/rooms/" + room["room"] + "/" + path
         request = Request(self.url + path, data=json.dumps(body).encode() if body is not None else None,
                           headers=headers)
@@ -33,6 +35,18 @@ class SignalingChecks(unittest.TestCase):
         except HTTPError as error:
             with error:
                 return error.code, json.load(error)
+
+    def test_member_cannot_take_a_keyed_peer_id(self):
+        status, room = self.request("/v1/rooms", {})
+        host, key = "H" * 24, "k" * 40
+        self.assertEqual(self.request("join", {}, room=room, peer=host, key=key)[0], 200)
+        self.assertEqual(self.request("join", {}, room=room, peer="B" * 24)[0], 200)
+        self.assertEqual(self.request("join", {}, room=room, peer=host)[0], 401)
+        self.assertEqual(self.request("join", {}, room=room, peer=host, key="x" * 40)[0], 401)
+        self.assertEqual(self.request("signal", {"recipient": "B" * 24, "box": "QUFB"}, room=room, peer=host)[0], 401)
+        self.request("leave", {}, room=room, peer=host, key=key)
+        self.assertEqual(self.request("join", {}, room=room, peer=host)[0], 401)
+        self.assertEqual(self.request("join", {}, room=room, peer=host, key=key)[0], 200)
 
     def test_negotiation_only_and_auth(self):
         status, room = self.request("/v1/rooms", {})

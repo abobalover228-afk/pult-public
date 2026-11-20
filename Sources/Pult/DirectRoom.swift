@@ -79,8 +79,12 @@ final class DirectRoom: NSObject {
     private let session: URLSession
     private var retry: DispatchWorkItem?
 
-    init(_ invitation: RoomInvitation, identity: String? = nil) {
+    private let peerKey: String?
+
+    /// peerKey закрепляет наш ID на сервере комнат: другой участник не сможет войти под ним.
+    init(_ invitation: RoomInvitation, identity: String? = nil, peerKey: String? = nil) {
         self.id = identity ?? UUID().uuidString
+        self.peerKey = peerKey
         self.invitation = invitation
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 30; config.timeoutIntervalForResource = 35
@@ -116,6 +120,7 @@ final class DirectRoom: NSObject {
         var request = URLRequest(url: url)
         request.setValue("Bearer " + invitation.access, forHTTPHeaderField: "Authorization")
         request.setValue(id, forHTTPHeaderField: "X-Pult-Peer")
+        if let key = peerKey { request.setValue(key, forHTTPHeaderField: "X-Pult-Peer-Key") }
         if let body = body {
             request.httpMethod = "POST"; request.httpBody = try? JSONSerialization.data(withJSONObject: body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
