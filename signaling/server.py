@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 ID = re.compile(r"^[A-Za-z0-9_-]{20,80}$")
+KEY = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 MAX_BODY = 64_000
 
 
@@ -29,6 +30,7 @@ class Room:
         self.changed = threading.Condition()
         self.touched = time.monotonic()
         self.budget = {}
+        self.keys = {}
         self.relay_budget = {}
 
     def emit(self, kind, sender, recipient="", box=""):
@@ -87,6 +89,13 @@ def make_handler(state):
         def log_message(self, *args):
             pass
 
+        def client(self):
+            # За Caddy все приходят с 127.0.0.1: берём адрес клиента, который дописал сам прокси.
+            address, forwarded = self.client_address[0], self.headers.get("X-Forwarded-For", "")
+            if address in ("127.0.0.1", "::1") and forwarded:
+                return forwarded.split(",")[-1].strip()[:64] or address
+            return address
+
         def reply(self, code, value):
             data = json.dumps(value, separators=(",", ":")).encode()
             self.send_response(code)
@@ -133,7 +142,7 @@ def make_handler(state):
                         raise RequestError(403)
                     if body:
                         raise RequestError(400)
-                    return self.reply(201, state.create(self.client_address[0]))
+                    return self.reply(201, state.create(self.client()))
                 parts = url.path.strip("/").split("/")
                 if len(parts) != 4 or parts[:2] != ["v1", "rooms"]:
                     raise RequestError(404)
@@ -150,6 +159,15 @@ def make_handler(state):
                     raise RequestError(400)
                 with room.changed:
                     room.prune()
+                    key = self.headers.get("X-Pult-Peer-Key", "")
+                    if peer in room.keys:
+                        if not hmac.compare_digest(room.keys[peer], key):
+                            raise RequestError(401)
+                    elif key:
+                        # Первый вход с ключом закрепляет ID за этим компьютером, пока жива комната.
+                        if method != "POST" or action != "join" or not KEY.fullmatch(key) or len(room.keys) >= 64:
+                            raise RequestError(401)
+                        room.keys[peer] = key
                     if method == "POST" and action == "join":
                         if body or len(room.peers) >= 8 and peer not in room.peers:
                             raise RequestError(409)
