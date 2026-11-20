@@ -7,6 +7,9 @@
     "targets": [
       "app"
     ],
+    "resources": {
+      "macos/pult-voice": "pult-voice"
+    },
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-"

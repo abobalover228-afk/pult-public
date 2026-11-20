@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Пульт слушает микрофон, только пока идёт диктовка.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Пульт превращает диктовку в текст сообщения.</string>
+</dict>
+</plist>

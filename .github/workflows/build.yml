@@ -5,6 +5,8 @@ on:
   pull_request:
     paths: ['windows/**', '.github/workflows/build.yml']
   workflow_dispatch:
+  release:
+    types: [published]
 permissions:
   contents: read
 jobs:
@@ -48,3 +50,18 @@ jobs:
         with:
           name: macOS-test-results
           path: windows/test-results
+  # Когда публикуешь релиз, к нему прикрепляется Mac-архив: по нему обновляется Пульт Rust на Mac.
+  publish:
+    if: github.event_name == 'release'
+    needs: macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Pult-Rust-macOS-arm64
+      - run: gh release upload "$TAG" Pult-Rust-macOS-arm64.zip --clobber -R "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}

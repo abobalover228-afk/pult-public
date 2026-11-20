@@ -37,6 +37,8 @@ export function localFileTarget(raw) {
 
 
 const symbols = {
+  conveyor: '<rect x="2.5" y="14" width="19" height="5" rx="2.5"/><circle cx="6.5" cy="16.5" r=".8"/><circle cx="12" cy="16.5" r=".8"/><circle cx="17.5" cy="16.5" r=".8"/><rect x="4" y="6" width="5" height="5" rx="1"/><rect x="13" y="4" width="6" height="7" rx="1"/>',
+  check: '<path d="m5 12.5 4.5 4.5L19 7"/>',
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/>',
   new: '<path d="M13 5H5v14h14v-8M10 14l1-4L19 2l3 3-8 8-4 1Z"/>',
   sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M6 7v1m0 3v1"/>',

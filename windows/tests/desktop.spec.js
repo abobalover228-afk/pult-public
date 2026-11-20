@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
 async function desktop(page, label = 'main') {
   await page.addInitScript(label => {
-    window.calls = []; window.handlers = {}; window.apiConnections = []; window.computerEnabled = false;
+    window.calls = []; window.handlers = {};
+    window.conveyorMock = method => ({ start: { base: 'main', branch: 'pult/epic-1', cwd: '/data/epic' }, task: { cwd: '/data/task' }, diff: { files: ['a.js'], diff: '+fixture change' }, run: { ok: true, output: 'passed' } })[method] || { ok: true }; window.apiConnections = []; window.computerEnabled = false;
     window.emitCodex = event => window.handlers.codex({ payload: event });
     window.__TAURI__ = {
       window: { getCurrentWindow: () => ({ label }) },
@@ -20,6 +21,7 @@ async function desktop(page, label = 'main') {
         if (module === 'accounts' && method === 'list') return [{ name: 'Основной', home: 'C:\\Users\\test\\.codex', signedIn: true, email: 'main@example.com', plan: 'plus' }, { name: 'Запасной', home: 'C:\\Users\\test\\.codex-2', signedIn: false }];
         if (module === 'accounts' && method === 'browsers') return { selected: 'auto', items: [{ name: 'Google Chrome', private: true }, { name: 'Safari', private: false }] };
         if (module === 'accounts' && method === 'login') { window.loginCalls = (window.loginCalls || 0) + 1; return { id: 'L1', home: 'C:\\Users\\test\\.codex-3' }; }
+        if (module === 'conveyor') return window.conveyorMock(method, args);
         if (module === 'mcp') return method === 'list' ? [{ name: 'test-server', enabled: true }] : { ok: true };
         if (module === 'api') {
           if (method === 'list') return window.apiConnections;
@@ -687,4 +689,42 @@ test('account rings can be hidden and restored in settings', async ({ page }) =>
   await page.locator('.toolbar-actions').getByRole('button', { name: 'Настройки', exact: true }).click();
   await page.getByLabel('Показывать панель лимитов под чатом').check();
   await expect(bar).toBeVisible();
+});
+
+test('conveyor plans waves, reviews twice, fixes, merges, checks and ships', async ({ page }) => {
+  await desktop(page);
+  await page.waitForFunction(async () => !!(await import('/core.js')).ui.conveyor);
+  await page.evaluate(async () => {
+    const { ui } = await import('/core.js'); const fake = []; window.prompts = []; let fixed = false;
+    Object.assign(ui.chats, { list: () => fake, activate: () => {}, close: async c => { fake.splice(fake.indexOf(c), 1); },
+      open: opts => { const c = { id: crypto.randomUUID(), messages: [], busy: false, ...opts }; fake.push(c); return c; },
+      send: async (text, { chat }) => {
+        const role = chat.conveyor.role; window.prompts.push({ role, slot: chat.conveyor.slot, title: chat.title, text }); chat.messages.push({ kind: 'user', text });
+        let reply = 'Готово\n```pult-lesson\nтесты лежат в tests/\n```';
+        if (role === 'planner') reply = '```pult-waves\n[{"tasks":[{"title":"A","detail":"a"},{"title":"B","detail":"b"}]},{"tasks":[{"title":"C","detail":"c"}]}]\n```';
+        if (role === 'reviewer') { const bad = chat.conveyor.slot === 'review2' && chat.title.endsWith(': A') && !fixed; fixed ||= bad; reply = '```pult-review\n' + JSON.stringify(bad ? { verdict: 'fix', notes: ['нет теста'] } : { verdict: 'ok', notes: [] }) + '\n```'; }
+        chat.messages.push({ kind: 'agent', text: reply }); setTimeout(() => ui.conveyor.event({ type: 'turnEnd', chat, failed: false }), 5);
+      } });
+    ui.openPanel('conveyor', 'main');
+  });
+  await page.getByPlaceholder(/Что должно получиться/).fill('Оплата картой');
+  await page.getByPlaceholder(/Проверка после каждой волны/).fill('npm test');
+  await page.getByRole('button', { name: 'Разложить на волны' }).click();
+  await expect(page.locator('.cv-wave')).toHaveCount(2);
+  await expect(page.locator('.cv-card')).toHaveCount(3);
+  await page.getByRole('button', { name: 'Запустить конвейер' }).click();
+  await expect(page.locator('.cv-pill')).toHaveText('Приёмка', { timeout: 10000 });
+  await expect(page.locator('.cv-card.done')).toHaveCount(3);
+  const prompts = await page.evaluate(() => window.prompts);
+  expect(prompts.filter(p => p.role === 'reviewer')).toHaveLength(8);
+  expect(prompts.find(p => p.role === 'worker' && p.text.includes('Исправь'))?.text).toContain('Ревью 2: нет теста');
+  expect(prompts.find(p => p.role === 'reviewer')?.text).toContain('+fixture change');
+  expect(prompts.find(p => p.role === 'worker' && p.title === '▸ C')?.text).toContain('волна 2 из 2');
+  expect(prompts.find(p => p.role === 'worker' && p.title === '▸ C')?.text).toContain('тесты лежат в tests/');
+  const calls = await page.evaluate(() => window.calls.filter(c => c.module === 'conveyor').map(c => c.method));
+  expect(calls.filter(m => m === 'merge')).toHaveLength(3);
+  expect(calls.filter(m => m === 'run')).toHaveLength(2);
+  expect(calls.indexOf('task', calls.indexOf('run'))).toBeGreaterThan(calls.indexOf('run')); // вторая волна стартует после проверки первой
+  await page.getByRole('button', { name: 'Влить в main' }).click();
+  await expect(page.locator('.cv-pill')).toHaveText('Принят');
 });

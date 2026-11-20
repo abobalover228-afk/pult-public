@@ -47,6 +47,14 @@ fn key(c: &Connection, env: &str) -> Result<String, String> {
     env.lines().find_map(|line| line.split_once('=').filter(|(k, _)| *k == c.env_name()).map(|(_, v)| v))
         .and_then(|v| STANDARD.decode(v).ok()).and_then(|v| String::from_utf8(v).ok()).filter(|v| !v.is_empty()).ok_or_else(|| "API-ключ отсутствует в .env приложения".into())
 }
+/// На Mac ключ живёт в Связке ключей, а не в .env. Старые ключи из .env читаются и переносятся при сохранении.
+#[cfg(target_os = "macos")]
+fn keychain(c: &Connection) -> Result<keyring::Entry, String> { keyring::Entry::new("Пульт API", &c.id).map_err(|_| "Связка ключей недоступна".into()) }
+fn stored(c: &Connection, env: &str) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    if let Ok(k) = keychain(c).and_then(|e| e.get_password().map_err(|e| e.to_string())) { if !k.is_empty() { return Ok(k); } }
+    key(c, env)
+}
 fn write_file(name: &str, bytes: &[u8], private: bool) -> Result<(), String> {
     use std::io::Write;
     let dir = util::data_dir();
@@ -71,12 +79,16 @@ fn save(a: Value) -> Result<Value, String> {
     c.name = c.name.trim().into(); c.model = c.model.trim().into(); c.base_url = c.base_url.trim().into(); c.endpoint()?;
     let old_env = secrets()?;
     let new_key = a["key"].as_str().unwrap_or_default().trim();
-    let active_key = if new_key.is_empty() { key(&c, &old_env)? } else { new_key.into() };
+    let active_key = if new_key.is_empty() { stored(&c, &old_env)? } else { new_key.into() };
     if active_key.len() > 16384 || !active_key.bytes().all(|b| (32..=126).contains(&b)) || active_key.is_empty() { return Err("Ключ должен быть одной строкой печатных символов".into()); }
     if [&c.name, &c.model, &c.base_url].iter().any(|v| v.contains(&active_key)) { return Err("Ключ разрешён только в поле API-ключа".into()); }
     let mut rows = connections()?; rows.retain(|r| r.id != c.id); rows.push(c.clone());
+    #[allow(unused_mut)]
     let mut env: String = old_env.lines().filter(|l| !l.starts_with(&format!("{}=", c.env_name()))).map(|l| format!("{l}\n")).collect();
-    env.push_str(&format!("{}={}\n", c.env_name(), STANDARD.encode(active_key)));
+    #[cfg(target_os = "macos")]
+    keychain(&c)?.set_password(&active_key).map_err(|_| "Не удалось сохранить ключ в Связку ключей")?;
+    #[cfg(not(target_os = "macos"))]
+    env.push_str(&format!("{}={}\n", c.env_name(), STANDARD.encode(&active_key)));
     write_file(".env", env.as_bytes(), true)?;
     if let Err(e) = write_file("connections.json", &serde_json::to_vec_pretty(&rows).map_err(|_| "Ошибка настроек")?, false) {
         let _ = write_file(".env", old_env.as_bytes(), true); return Err(e);
@@ -126,6 +138,8 @@ pub async fn call(_app: &AppHandle, method: &str, a: Value) -> Result<Value, Str
             let old_env = secrets()?;
             let env: String = old_env.lines().filter(|l| !l.starts_with(&format!("{}=", c.env_name()))).map(|l| format!("{l}\n")).collect();
             rows.retain(|c| c.id != id);
+            #[cfg(target_os = "macos")]
+            if let Ok(entry) = keychain(&c) { let _ = entry.delete_credential(); }
             write_file(".env", env.as_bytes(), true)?;
             if let Err(e) = write_file("connections.json", &serde_json::to_vec_pretty(&rows).map_err(|_| "Ошибка настроек")?, false) {
                 let _ = write_file(".env", old_env.as_bytes(), true); return Err(e);
@@ -145,7 +159,7 @@ pub async fn call(_app: &AppHandle, method: &str, a: Value) -> Result<Value, Str
             let (c, secret) = {
                 let _guard = STORE.lock().unwrap();
                 let c = connections()?.into_iter().find(|c| c.id == a["connection"].as_str().unwrap_or_default()).ok_or("Подключение не найдено")?;
-                let secret = key(&c, &secrets()?)?; (c, secret)
+                let secret = stored(&c, &secrets()?)?; (c, secret)
             };
             let chat = a["chat"].as_str().ok_or("Нет чата")?.to_string();
             let cancel = Arc::new(Notify::new());

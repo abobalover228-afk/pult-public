@@ -105,14 +105,14 @@ function loginSheet() {
   if (login.stage === 'start') body.push(h('div.ac-wait', {}, h('span.ac-spin'), 'Запрашиваю код входа…'));
   if (login.stage === 'code') body.push(
     h('div.ac-step', {}, h('span.ac-num', {}, '1'), h('div', {}, h('strong', {}, 'Страница входа'), h('small', {}, login.browser ? `Открыта ${login.private ? "в приватном окне" : "в обычном окне"} ${login.browser}. Войди нужным аккаунтом ChatGPT.` : (login.browserError || 'Скопируй ссылку в приватное окно браузера.')),
-      h('div.ac-link', {}, h('code', {}, login.url.replace(/^https:\/\//, '')), button('Открыть снова', async () => { const r = await call('accounts', 'openPrivate', { url: login.url }); login.browser = r?.browser; login.private = r?.private; render(); }), button('Обычно', () => action('url', { url: login.url })), button('Копировать', () => copyText(login.url))))),
+      h('div.ac-link', {}, h('code', {}, login.url.replace(/^https:\/\//, '')), button('Открыть снова', async () => { const r = await call('accounts', 'openPrivate', { url: login.url }); login.browser = r?.browser; login.private = r?.private; render(); }), button('Без инкогнито', () => action('url', { url: login.url })), button('Копировать', () => copyText(login.url))))),
     h('div.ac-step', {}, h('span.ac-num', {}, '2'), h('div', {}, h('strong', {}, 'Код'), h('small', {}, 'Уже в буфере обмена — просто вставь на странице. Действует 15 минут.'),
       h('div.ac-code', {}, ...[...login.code].map(c => h(c === '-' ? 'i' : 'b', {}, c === '-' ? '' : c)), button('Копировать', () => copyText(login.code))))),
     h('div.ac-wait', {}, h('span.ac-spin'), 'Жду, пока подтвердишь в браузере — аккаунт добавится сам'));
-  if (login.stage === 'done') body.push(h('div.ac-done', {}, h('span.ac-check', {}, '✓'), h('div', {}, h('strong', {}, login.duplicate ? 'Этот вход уже есть' : 'Готово'),
+  if (login.stage === 'done') body.push(h(login.duplicate ? 'div.ac-done.warn' : 'div.ac-done', {}, h('span.ac-check', {}, login.duplicate ? '!' : '✓'), h('div', {}, h('strong', {}, login.duplicate ? 'Этот вход уже есть' : 'Готово'),
     h('small', {}, login.duplicate ? `${login.email} уже подключён как «${login.duplicate}». Два одинаковых аккаунта делят один лимит, второй не добавлен.` : [login.name, login.email, login.plan && String(login.plan).replace(/^./, c => c.toUpperCase())].filter(Boolean).join(' · ')))));
   if (login.stage === 'error') body.push(h('div.ac-done.bad', {}, h('span.ac-check', {}, '!'), h('div', {}, h('strong', {}, 'Не получилось'), h('small', {}, login.message || 'Вход не завершён'))), button('Ещё раз', () => startLogin(login.home), 'primary'));
-  return h('div.ac-sheet', {}, h('div.ac-card', {}, h('header', {}, h('strong', {}, login.home ? 'Вход в аккаунт' : 'Новый аккаунт'), button(['done', 'error'].includes(login.stage) ? 'Готово' : 'Отмена', close)), ...body));
+  return h('div.ac-sheet', {}, h('div.ac-card', {}, h('header', {}, h('strong', {}, login.home ? 'Вход в аккаунт' : 'Новый аккаунт'), button(login.stage === 'done' ? 'Готово' : login.stage === 'error' ? 'Закрыть' : 'Отмена', close)), ...body));
 }
 async function takeUi() {
   const job = await action('takeUi').catch(() => null); if (!job) return;

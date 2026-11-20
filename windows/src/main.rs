@@ -7,6 +7,7 @@ mod api;
 mod claude;
 mod codex;
 mod computer;
+mod conveyor;
 mod limits;
 mod mods;
 mod mcp;
@@ -30,6 +31,7 @@ async fn call(app: AppHandle, module: String, method: String, args: Value) -> Re
         "mcp" => mcp::call(&app, &method, args).await,
         "mods" => mods::call(&app, &method, args).await,
         "team" => team::call(&app, &method, args).await,
+        "conveyor" => conveyor::call(&app, &method, args).await,
         "telegram" => telegram::call(&app, &method, args).await,
         "voice" => voice::call(&app, &method, args).await,
         "updater" => updater::call(&app, &method, args).await,

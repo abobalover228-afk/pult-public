@@ -3,3 +3,4 @@ target/
 node_modules/
 test-results/
 playwright-report/
+macos/pult-voice
