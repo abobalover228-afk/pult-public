@@ -85,3 +85,33 @@ test('restored local history reuses its existing tab and preserves pending branc
  await row.click(); await row.click();
  expect(await page.evaluate(async () => ({ reads: window.reads, seed: (await import('/core.js')).ui.chats.current().seed }))).toEqual({ reads: 1, seed: 'Previous context' });
 });
+
+for (const mode of ['assistant', 'result', 'stream-and-assistant']) {
+  test(`Claude final reply survives ${mode} delivery without duplicates`, async ({ page }) => {
+    await page.addInitScript(() => {
+      window.nativeListeners = {};
+      window.__TAURI__ = { event: { listen: async (name, fn) => { (window.nativeListeners[name] ||= []).push(fn); return () => {}; } }, core: { invoke: async (_, r) => {
+        if (r.module === 'app') return ({accounts:[], info:{home:'/tmp',os:'macos'},settings:{}})[r.method] ?? null;
+        if (r.method === 'threads' || r.method === 'list') return [];
+        return null;
+      } } };
+    });
+    await page.goto('/');
+    await expect.poll(()=>page.evaluate(async()=>!!(await import('/core.js')).ui.chats.current())).toBe(true);
+    await page.evaluate(async mode => {
+      const {ui} = await import('/core.js');
+      const c = ui.chats.open({target:'claude'});
+      c.messages.push({kind:'user',text:'Проверь',id:'user'}); c.busy = true;
+      const emit = event => Promise.all(window.nativeListeners.claude.map(fn=>fn({payload:{chat:c.id,gen:c.gen,event}})));
+      const text='```pult-review\n{"verdict":"ok","notes":[]}\n```';
+      if (mode === 'stream-and-assistant') {
+        await emit({type:'stream_event',event:{type:'message_start',message:{id:'reply'}}});
+        await emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text',text:''}}});
+        await emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text}}});
+      }
+      if (mode !== 'result') await emit({type:'assistant',message:{id:'reply',content:[{type:'text',text}]}});
+      await emit({type:'result',is_error:false,result:text});
+    }, mode);
+    expect(await page.evaluate(async()=> (await import('/core.js')).ui.chats.current().messages.filter(m=>m.kind==='agent').map(m=>m.text))).toEqual(['```pult-review\n{"verdict":"ok","notes":[]}\n```']);
+  });
+}

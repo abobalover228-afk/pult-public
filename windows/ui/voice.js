@@ -1,10 +1,117 @@
-import {call,ui,h,settings} from './core.js';
-import {button} from './render.js';
-let listening=false,playback=false,epoch=0,speak=false,handsfree=false,language='ru-RU';
-const stop=async()=>{epoch++;listening=false;playback=false;await call('voice','stop');};
-async function dictate(){if(listening)return stop();const chat=ui.chats.current(),run=++epoch;listening=true;ui.toast('Микрофон включён. Повторное нажатие остановит запись.');try{const result=await call('voice','listen',{language});if(run!==epoch||ui.chats.current()!==chat)return;if(result.text){if(handsfree)await ui.chats.send(result.text,{chat,literal:true,origin:'voice'});else ui.chats.insert(result.text);}}finally{if(run===epoch)listening=false;}}
-ui.addComposerButton({id:'voice',title:'Диктовка',icon:'🎙',run:()=>{dictate().catch(ui.toast);}});
-ui.addSettings({id:'voice',title:'Голос',render(el){const lang=h('input',{value:language,placeholder:'ru-RU'}),speech=h('input',{type:'checkbox',checked:speak}),hands=h('input',{type:'checkbox',checked:handsfree});el.append(h('p',{},'Используется системный System.Speech. Нужен установленный речевой пакет языка. Запись включается кнопкой микрофона.'),h('label',{},'Язык ',lang),h('label',{},speech,' Озвучивать ответы'),h('label',{},hands,' Отправлять распознанную речь'),button('Сохранить голос',async()=>{language=lang.value;speak=speech.checked;handsfree=hands.checked;await settings.set('voice',{language,speak,handsfree})}),button('Остановить голос',stop));}});
+import { call, ui, h, settings } from './core.js';
+import { button } from './render.js';
+import { sphere } from './sphere.js';
+let listening = false, playback = false, epoch = 0, speak = false, handsfree = false, language = 'ru-RU', voice = '';
+let dialog = false, dialogChat = null, host = null, state = 'idle', lastText = '', error = '';
+const labels = { idle: 'На связи', listening: 'Слушаю тебя', thinking: 'Думаю', speaking: 'Отвечаю', error: 'Не удалось продолжить' };
+function update(next = state) {
+  state = next;
+  document.documentElement.dataset.voice = state;
+  if (!host?.isConnected) return;
+  host.querySelector('.voice-scene').dataset.state = state;
+  host.querySelector('.voice-status').textContent = labels[state];
+  host.querySelector('.voice-caption').textContent = error || lastText || 'Скажи, что хочешь обсудить или сделать';
+  const toggle = host.querySelector('.voice-toggle');
+  toggle.textContent = dialog ? 'Завершить разговор' : 'Начать разговор';
+  toggle.setAttribute('aria-pressed', String(dialog));
+}
+async function stop() {
+  epoch++; dialog = false; dialogChat = null; listening = false; playback = false;
+  update('idle'); await call('voice', 'stop');
+}
+function fail(err, run) {
+  if (run !== epoch) return;
+  dialog = false; dialogChat = null; listening = playback = false;
+  error = String(err.message || err); update('error'); ui.toast(error);
+}
+async function listen(chat, continuous = false) {
+  if (listening || playback || chat?.busy) return;
+  const run = ++epoch; listening = true; error = ''; update('listening');
+  try {
+    const result = await call('voice', 'listen', { language });
+    if (run !== epoch || ui.chats.current() !== chat) return;
+    listening = false;
+    const text = result?.text?.trim();
+    if (!text) { if (continuous) await stop(); else update('idle'); return; }
+    lastText = text;
+    if (continuous || handsfree) {
+      update('thinking'); await ui.chats.send(text, { chat, literal: true, origin: 'voice' });
+    } else { ui.chats.insert(text); update('idle'); }
+  } catch (err) { fail(err, run); }
+  finally { if (run === epoch) listening = false; }
+}
+async function startDialog() {
+  if (dialog) { await stop(); return; }
+  const chat = ui.chats.current();
+  if (!chat) throw Error('Открой чат для разговора');
+  if (chat.busy) throw Error('Дождись ответа агента');
+  dialog = true; dialogChat = chat; await listen(chat, true);
+}
+const spokenText = text => text.replace(/```[\s\S]*?```/g, ' Код — в чате. ').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/https?:\/\/\S+/g, '').replace(/[*_#`>]/g, '').trim();
+async function answer(e) {
+  if (e.chat !== ui.chats.current()) return;
+  if (e.failed) { if (dialog) await stop(); update('idle'); return; }
+  if (!speak && !dialog) { update('idle'); return; }
+  const start = e.chat.messages.map(m => m.kind).lastIndexOf('user');
+  const text = spokenText([...e.chat.messages.slice(start + 1)].reverse().find(m => m.kind === 'agent')?.text || '');
+  if (!text) { if (dialog) await stop(); update('idle'); return; }
+  const run = ++epoch; playback = true; lastText = text; error = ''; update('speaking');
+  try {
+    await call('voice', 'speak', { text, language, voice });
+    if (run !== epoch) return;
+    playback = false; update('idle');
+    if (dialog && dialogChat === e.chat) await listen(e.chat, true);
+  } catch (err) { fail(err, run); }
+  finally { if (run === epoch) playback = false; }
+}
+const saveVoice = () => settings.set('voice', { language, voice, speak, handsfree });
+function voiceControls() {
+  const select = h('select', { 'aria-label': 'Голос озвучки' }, h('option', { value: '' }, 'Системный голос'));
+  const hint = h('span.voice-picker-hint', {}, 'Загружаю голоса…');
+  select.onchange = async () => {
+    if (listening || playback || dialog) { select.value = voice; ui.toast('Сначала останови разговор или озвучку'); return; }
+    voice = select.value;
+    try { await saveVoice(); } catch (err) { ui.toast(String(err)); }
+  };
+  call('voice', 'voices').then(result => {
+    const voices = (result?.voices || []).filter(v => typeof v.id === 'string' && typeof v.name === 'string' && typeof v.language === 'string');
+    const languages = [...new Set(voices.map(v => v.language))].sort((a, b) => (b.startsWith(language.split('-')[0]) - a.startsWith(language.split('-')[0])) || a.localeCompare(b));
+    select.replaceChildren(h('option', { value: '' }, 'Системный голос'), ...languages.map(lang => h('optgroup', { label: lang }, ...voices.filter(v => v.language === lang).map(v => h('option', { value: v.id }, v.name)))));
+    if (voice && !voices.some(v => v.id === voice)) select.append(h('option', { value: voice }, 'Сохранённый голос недоступен'));
+    select.value = voice;
+    hint.textContent = voices.length ? `${voices.length} системных голосов` : 'Дополнительных голосов в системе нет';
+  }).catch(err => { hint.textContent = String(err); });
+  const preview = button('Послушать', () => {
+    if (listening || playback || dialog) { ui.toast('Сначала останови разговор или озвучку'); return; }
+    const run = ++epoch;
+    const text = language.startsWith('ru') ? 'Привет, брат. Я голос Пульта. Давай обсудим твой проект.' : 'Hello. I am the voice of Pult. Let us talk about your project.';
+    playback = true; lastText = text; error = ''; update('speaking');
+    call('voice', 'speak', { text, language, voice }).then(() => { if (run === epoch) { playback = false; update('idle'); } }).catch(err => fail(err, run));
+  }, 'voice-preview');
+  return h('div.voice-picker', {}, h('label', {}, h('span', {}, 'Голос'), select), preview, hint);
+}
+ui.addComposerButton({ id: 'voice', title: 'Диктовка', icon: 'Диктовка', run: () => { (listening ? stop() : listen(ui.chats.current())).catch(ui.toast); } });
+ui.addComposerButton({ id: 'voice-sphere', title: 'Голосовой разговор', icon: 'Голосовой разговор', run: () => ui.openPanel('voice-sphere', 'main') });
+ui.addPanel({ id: 'voice-sphere', title: 'Голосовой разговор', slot: 'main', render(el) {
+  host = el;
+  el.append(h('div.voice-scene', { 'data-state': state },
+    h('div.voice-heading', {}, h('span', {}, 'ПУЛЬТ · ГОЛОС'), button('Вернуться в чат', () => ui.closePanel('voice-sphere'), 'voice-back')),
+    h('div.voice-center', {}, h('div.voice-orbit', { 'aria-hidden': 'true' }, sphere(240)),
+      h('h1.voice-status', { role: 'status', 'aria-live': 'polite' }), h('p.voice-caption')),
+    h('div.voice-actions', {}, voiceControls(), button('Начать разговор', () => { startDialog().catch(ui.toast); }, 'voice-toggle'), h('span', {}, 'Микрофон включается только на время разговора'))));
+  update();
+}, dispose() { host = null; if (dialog || listening || playback) stop().catch(ui.toast); } });
+ui.addSettings({ id: 'voice', title: 'Голос', render(el) {
+  const lang = h('input', { value: language, placeholder: 'ru-RU' }), speech = h('input', { type: 'checkbox', checked: speak }), hands = h('input', { type: 'checkbox', checked: handsfree });
+  el.append(h('p', {}, 'Системное распознавание и озвучка macOS / Windows. Голосовой разговор — по кнопке сферы рядом с полем сообщения.'), h('label', {}, 'Язык ', lang), voiceControls(), h('label', {}, speech, ' Озвучивать ответы в обычном чате'), h('label', {}, hands, ' Отправлять диктовку сразу'), button('Сохранить голос', async () => { language = lang.value.trim() || 'ru-RU'; speak = speech.checked; handsfree = hands.checked; await saveVoice(); }), button('Остановить голос', stop));
+} });
 await ui.ready;
-ui.chats.onEvent(e=>{if((e.type==='open'||e.type==='close')&&(listening||playback)){stop().catch(ui.toast);return;}if(e.type==='turnEnd'&&speak&&!e.failed&&e.chat===ui.chats.current()){const text=[...e.chat.messages].reverse().find(m=>m.kind==='agent')?.text;if(text){playback=true;const run=++epoch;call('voice','speak',{text,language}).catch(ui.toast).finally(()=>{if(run===epoch)playback=false;});}}});
-const saved=await settings.get('voice');if(saved){language=saved.language||language;speak=!!saved.speak;handsfree=!!saved.handsfree;}
+ui.chats.onEvent(e => {
+  if ((e.type === 'open' || e.type === 'close') && (dialog || listening || playback)) { stop().catch(ui.toast); return; }
+  if (e.chat !== ui.chats.current()) return;
+  if (e.type === 'turnStart') update('thinking');
+  if (e.type === 'message' && e.message.kind === 'agent' && !dialog && !playback) update('thinking');
+  if (e.type === 'turnEnd') answer(e).catch(ui.toast);
+});
+const saved = await settings.get('voice');
+if (saved) { language = saved.language || language; voice = typeof saved.voice === 'string' ? saved.voice : ''; speak = !!saved.speak; handsfree = !!saved.handsfree; }

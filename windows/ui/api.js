@@ -1,9 +1,10 @@
+import { devinProvider } from './devin.js';
 import { call, ui, h } from './core.js';
 import { button } from './render.js';
 let connections = [];
 async function refresh() {
   connections = await call('api', 'list');
-  ui.setProviders(connections.map(c => ({ id: `api:${c.id}`, title: c.name, model: c.model })));
+  ui.setProviders([...connections.map(c => ({ id: `api:${c.id}`, title: c.name, model: c.model })), ...ui.providers.filter(p => p.id === devinProvider)]);
 }
 function editor(el, c = { id: crypto.randomUUID(), name: '', baseURL: '', model: '' }) {
   const name = h('input', { value: c.name, placeholder: 'Название подключения', required: true });

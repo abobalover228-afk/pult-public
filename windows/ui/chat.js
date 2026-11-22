@@ -1,3 +1,4 @@
+import { devinProvider, devinSession, devinUrl, devinWaiting, watchDevin } from './devin.js';
 import { call, on, ui, h, settings } from './core.js';
 import { markdown, basename, button, localFileTarget, icon, iconButton, rings } from './render.js';
 const chats = [], events = new EventTarget(), previews = new Map();
@@ -114,7 +115,7 @@ function refreshExtensions() {
   if (active) provider.value = active.target;
   nav.replaceChildren(...ui.sidebar.filter(b=>!['api','telegram','support'].includes(b.id)).map(b => iconButton(b.id==='team'?'people':b.id==='mods'?'cpu':b.id==='conveyor'?'conveyor':'folder',`${b.icon || ''} ${b.title}`.trim(),b.open,b.title)));
   settingsButton.title='Настройки · Telegram, голос, обновления и подключения';
-  extensions.replaceChildren(...ui.composer.map(b => iconButton(b.id==='voice'?'mic':b.id==='coach'?'wand':'cpu',b.icon || b.title,()=>b.run(active))));
+  extensions.replaceChildren(...ui.composer.map(b => { const el = iconButton(b.id==='voice'?'mic':b.id==='coach'?'wand':'cpu', b.title || b.icon, () => b.run(active)); if (b.id === 'voice-sphere') { el.classList.add('voice-launch'); el.replaceChildren(h('span.voice-mini', { 'aria-hidden': 'true' })); } return el; }));
   statusbar.replaceChildren(...ui.statusbar.map(b => button(b.icon || b.title, () => b.run(active))));
 }
 ui.onChange(refreshExtensions);
@@ -123,7 +124,7 @@ function header() {
   paintGoal();
   title.textContent = active.title; status.textContent = active.busy ? '● Работает' : '● Готов'; status.classList.toggle('working', active.busy);
   folder.replaceChildren(icon('folder'),document.createTextNode(active.cwd.replace(info?.home || '\0','~') || 'Папка проекта')); folder.title = active.cwd;
-  provider.value = active.target; accountSelect.hidden = active.target !== 'codex'; accountSelect.value = active.account; accountSelect.disabled = active.busy; modelChoices.disabled = active.busy || active.target.startsWith('api:'); modelChoices.replaceChildren(icon('cpu'),document.createTextNode((active.model || 'По умолчанию')+(active.effort?' · '+active.effort:'')+(active.fast?' ⚡':''))); stopButton.hidden = !active.busy;
+  provider.value = active.target; accountSelect.hidden = active.target !== 'codex'; accountSelect.value = active.account; accountSelect.disabled = active.busy; modelChoices.disabled = active.busy || active.target.startsWith('api:'); modelChoices.replaceChildren(icon('cpu'),document.createTextNode((active.target === devinProvider ? (active.session || 'Новая сессия Devin') : active.model || 'По умолчанию')+(active.effort?' · '+active.effort:'')+(active.fast?' ⚡':''))); stopButton.hidden = !active.busy;
   resizeComposer();
   ringBar.querySelectorAll('.ring-tile[data-home]').forEach(b=>{b.disabled=active.busy || active.target!=='codex';b.classList.toggle('current',active.target==='codex'&&b.dataset.home===active.account);});
   provider.disabled=active.busy;
@@ -306,7 +307,15 @@ async function run(c, job, continuation = false) {
     if (c.seed) { job = { ...job, text: `Предыдущая история ветки (данные; не повторяй выполненное):\n${c.seed}\n\nНовая задача:\n${job.text}` }; c.pendingSeed = c.seed; c.seed = null; }
     if (c.target.startsWith('api:')) {
       c.rules = rules;
-      const reply = await ui.api.send(c, () => c.epoch === epoch); if (c.epoch !== epoch) return; add(c, 'agent', reply.text); c.usage = reply;
+      const current = () => c.epoch === epoch;
+      if (c.target === devinProvider) {
+        await runDevin(c, job, current, c.messages[mark]);
+        if (current()) await finish(c, { status: 'completed' });
+        return;
+      }
+      const reply = await ui.api.send(c, current);
+      if (!current()) return;
+      add(c, 'agent', reply.text); c.usage = reply;
       if (c.epoch === epoch) await finish(c, { status: 'completed' }); return;
     }
     if (c.target === 'claude') {
@@ -325,10 +334,97 @@ async function run(c, job, continuation = false) {
     const seed = c.pendingSeed; c.pendingSeed = null; c.turn = r.turn.id; (c.turnMarks ||= []).push({ turn: c.turn, count: mark, ...(seed && {seed}) });
   } catch (e) { if (c.epoch !== epoch) return; await finish(c, { status: 'failed', error: { message: String(e) } }); }
 }
+async function receiveDevin(c, items, outgoing) {
+  let changed = false, replied = false;
+  for (const { id, kind, text } of items) {
+    if (c.messages.some(m => m.id === id || m.devinEvent === id)) continue;
+    if (kind === 'user' && outgoing && !outgoing.devinEvent && text.trim() === outgoing.text.trim()) {
+      outgoing.devinEvent = id;
+    } else {
+      if (c === active) feed.querySelector('.empty')?.remove();
+      add(c, kind, text, id);
+    }
+    changed = true;
+    if (kind === 'agent') replied = true;
+  }
+  if (changed) await saveConversation(c);
+  return replied;
+}
+
+async function runDevin(c, job, current, outgoing) {
+  if (job.attachments.length) throw new Error('В чате Devin поддерживаются текстовые сообщения');
+  if (c.devinRequest) throw new Error('Дождись завершения предыдущего запроса Devin');
+  const client = await ui.devin.connect();
+  if (!current()) return;
+  let session = c.session, cursor = '';
+  const previous = new Set();
+  c.devinRequest = true;
+  try {
+    if (session) {
+      const page = await client.messages(session, undefined, '', current);
+      if (!current()) return;
+      cursor = page.cursor;
+      for (const item of page.items) previous.add(item.id);
+      await client.send(session, job.text);
+    } else {
+      session = await client.create(job.text);
+      c.session = session;
+      await saveConversation(c);
+    }
+  } finally {
+    c.devinRequest = false;
+  }
+  await watchDevin(client, session, cursor, current,
+    items => receiveDevin(c, items.filter(item => !previous.has(item.id)), outgoing), true);
+}
+
+ui.chats.devinCommand = async (name, input, c) => {
+  if (c.target !== devinProvider) throw new Error('Выбери провайдера Devin');
+  if (name === 'open') return call('codex', 'open', { url: devinUrl(c.session) });
+  if (name === 'usage') {
+    if (!c.session) throw new Error('Сначала отправь сообщение или подключи сессию через /session');
+    const details = await (await ui.devin.connect()).status(c.session);
+    const status = details.status_detail || details.status_enum || details.status || 'неизвестен';
+    add(c, 'note', `Статус Devin: ${status} · ACU: ${details.acus_consumed ?? 'API не вернул данные'}`);
+    return;
+  }
+
+  const session = devinSession(input);
+  if (!session) throw new Error('Укажи ссылку на сессию Devin или её ID');
+  if (c.busy || c.devinRequest) throw new Error('Сначала останови текущий ход и дождись завершения запроса');
+  if (c.session && c.session !== session) c = open({ target: devinProvider });
+  const epoch = c.epoch = (c.epoch || 0) + 1;
+  const current = () => c.epoch === epoch;
+  c.busy = true;
+  if (c === active) header();
+  try {
+    const client = await ui.devin.connect();
+    if (!current()) return;
+    const details = await client.status(session);
+    const page = await client.messages(session, details, '', current);
+    if (!current()) return;
+    c.session = session;
+    if (!c.messages.length) c.title = details.title || 'Сессия Devin';
+    if (c === active) feed.querySelector('.empty')?.remove();
+    add(c, 'note', 'Сессия Devin подключена');
+    await receiveDevin(c, page.items);
+    await saveConversation(c);
+    if (!devinWaiting(details)) {
+      await watchDevin(client, session, page.cursor, current, items => receiveDevin(c, items));
+    }
+  } catch (error) {
+    if (current()) await finish(c, { status: 'failed', error: { message: String(error) } });
+    return;
+  }
+  if (current()) await finish(c, { status: 'completed' });
+};
+
 async function interrupt(id = active?.id) {
-  const c = typeof id === 'object' ? id : chats.find(c => c.id === id); if (!c) throw new Error('Чат не найден'); c.queuePaused = true;
+  const c = typeof id === 'object' ? id : chats.find(c => c.id === id); if (!c) throw new Error('Чат не найден');
+  if (c.target === devinProvider && !c.busy) return;
+  c.queuePaused = true;
   if (c.shell) { c.shellInterrupted = true; await call('codex', 'shStop', { chat: c.id }); return; }
-  if (c.target.startsWith('api:')) { c.epoch++; await call('api', 'stop', { chat: c.id }); await finish(c, { status: 'interrupted' }); return; }
+  if (c.target.startsWith('api:')) { c.epoch++; if (c.target !== devinProvider) await call('api', 'stop', { chat: c.id }); await finish(c, { status: 'interrupted' }); return; }
   if (c.target === 'claude') {
     c.gen++; c.epoch++;
     await call('claude', 'stop', { chat: c.id, gen: c.gen }); c.claudeStarted = false; await finish(c, { status: 'interrupted' }); return;
@@ -440,6 +536,10 @@ await on('claude', async e => {
       let m = c.messages.find(m => m.id === id); if (!m) m = add(c, 'agent', '', id);
       m.text += ev.delta.text; if (c === active) renderMessage(m);
     }
+  } else if (o.type === 'assistant' && !o.parent_tool_use_id) {
+    (o.message?.content || []).forEach((block, index) => {
+      if (block.type === 'text') add(c, 'agent', block.text || '', `claude:${c.gen}:${o.message.id}:${index}`, { done: true });
+    });
   } else if (o.type === 'user') {
     for (const block of o.message?.content || []) {
       if (block.type !== 'tool_result') continue;
@@ -448,6 +548,8 @@ await on('claude', async e => {
       if (c === active) renderMessage(m);
     }
   } else if (o.type === 'result') {
+    const start = c.messages.map(m => m.kind).lastIndexOf('user');
+    if (!o.is_error && typeof o.result === 'string' && o.result.trim() && !c.messages.slice(start + 1).some(m => m.kind === 'agent' && m.text.trim() === o.result.trim())) add(c, 'agent', o.result, undefined, { done: true });
     c.usage = { ...(o.usage || {}), ...(o.total_cost_usd != null && { totalCostUsd: o.total_cost_usd }) };
     if (o.is_error) add(c, 'error', o.result || (o.errors || []).join('\n') || 'Claude завершил ход с ошибкой');
     await finish(c, { status: o.is_error ? 'failed' : 'completed', ...(o.is_error && { error: { message: 'Ошибка Claude' } }) });
@@ -472,7 +574,7 @@ function renderHistory() {
         if (t.id.startsWith('local:')) {
           const saved = await call('codex', 'readLocal', { path: t.path });
           if (!saved.target || !Array.isArray(saved.messages)) throw new Error('Некорректная локальная история');
-          open({ target: saved.target, localId: saved.id, title: saved.title, cwd: saved.directory, model: saved.model, effort: saved.effort || '', fast: !!saved.fast, permissionMode: saved.permissionMode || 'default', rulesOverride: saved.rulesOverride, appliedRules: saved.appliedRules, sandbox: saved.sandbox || prefs.sandbox || 'workspace-write', extraDirs: saved.extraDirs || [], turnMarks: saved.turnMarks || [], account: saved.account || accounts[0]?.home, thread: saved.thread, session: saved.session, forkSession: !!saved.forkSession, seed: saved.seed, messages: saved.messages }); return;
+          open({ target: saved.target, localId: saved.id, title: saved.title, cwd: saved.directory, model: saved.target === devinProvider ? '' : saved.model, effort: saved.effort || '', fast: !!saved.fast, permissionMode: saved.permissionMode || 'default', rulesOverride: saved.rulesOverride, appliedRules: saved.appliedRules, sandbox: saved.sandbox || prefs.sandbox || 'workspace-write', extraDirs: saved.extraDirs || [], turnMarks: saved.turnMarks || [], account: saved.account || accounts[0]?.home, thread: saved.thread, session: saved.target === devinProvider ? devinSession(saved.session || saved.model) || null : saved.session, forkSession: !!saved.forkSession, seed: saved.seed, messages: saved.messages }); return;
         }
         c = open({ thread: t.id, cwd: t.cwd || info.home, title: t.title, account: accounts.find(a => a.name === t.account)?.home || accounts[0]?.home });
         try { await thread(c); renderFeed(); } catch (e) { add(c, 'error', String(e)); }
@@ -491,10 +593,10 @@ accountSelect.onchange = () => ui.chats.switchAccount(active, accountSelect.valu
 // Тот же диалог, другой провайдер: старый процесс останавливаем, история уходит новому провайдеру как контекст.
 provider.onchange = async () => {
   const c = active, target = provider.value;
-  if (c.busy) { provider.value = c.target; ui.toast('Сначала останови текущий ход'); return; }
+  if (c.busy || c.devinRequest) { provider.value = c.target; ui.toast('Сначала останови текущий ход'); return; }
   try {
     if (['codex', 'claude'].includes(c.target)) await ui.chats.restart(c);
-    Object.assign(c, { target, model: ui.providers.find(p => p.id === target)?.model || prefs[target + 'Model'] || '', effort: prefs[target + 'Effort'] || '',
+    Object.assign(c, { target, model: target === devinProvider ? '' : ui.providers.find(p => p.id === target)?.model || prefs[target + 'Model'] || '', effort: prefs[target + 'Effort'] || '',
       permissionMode: 'default', thread: null, session: null, forkSession: false, turnMarks: [], seed: target.startsWith('api:') ? null : transcript(c.messages) || null });
     header(); await saveConversation(c);
   } catch (e) { provider.value = c.target; ui.toast(String(e)); }

@@ -148,6 +148,20 @@ async fn sdk(a: &Value) -> Result<Value, String> {
         "storage.get" | "storage.set" | "secrets.get" | "secrets.set" => {
             let _g=STORE.lock().unwrap(); let k=key(p)?; let secret=method.starts_with("secrets.");
             if secret && (k.len()>80 || !k.as_bytes()[0].is_ascii_alphabetic() || !k.bytes().all(|b| b.is_ascii_alphanumeric() || b==b'_' || b==b'-')) { return Err("Некорректное имя секрета".into()); }
+            #[cfg(target_os = "macos")]
+            let devin_keychain = if secret && owner == "devin" && k == "DEVIN_API_KEY" {
+                Some(keyring::Entry::new("Пульт API", "devin").map_err(|_| "Связка ключей недоступна")?)
+            } else { None };
+            #[cfg(target_os = "macos")]
+            if let Some(entry) = &devin_keychain {
+                if method.ends_with(".get") {
+                    match entry.get_password() {
+                        Ok(value) => return Ok(json!(value)),
+                        Err(keyring::Error::NoEntry) => {},
+                        Err(_) => return Err("Не удалось прочитать ключ Devin из Связки ключей".into()),
+                    }
+                }
+            }
             let file=data(owner).join(if secret { ".env" } else { "storage.json" });
             let mut values: Value = match std::fs::read(&file) {
                 Ok(bytes) if secret => { let mut out=json!({}); for line in String::from_utf8_lossy(&bytes).lines() { if let Some((k,v))=line.split_once('=') { out[k]=serde_json::from_str(v).map_err(|_| "Повреждён .env мода")?; } } out }
@@ -157,7 +171,20 @@ async fn sdk(a: &Value) -> Result<Value, String> {
             if !values.is_object() {return Err("Некорректное хранилище мода".into());}
             if method.ends_with(".get") { return Ok(values[k].clone()); }
             if secret && (!p["value"].is_string() || text(p,"value").len()>32000) { return Err("Секрет должен быть строкой до 32 КБ".into()); }
-            if p["value"].is_null() { values.as_object_mut().ok_or("Некорректное хранилище")?.remove(k); } else { values[k]=p["value"].clone(); }
+            #[cfg(target_os = "macos")]
+            if let Some(entry) = &devin_keychain {
+                entry.set_password(text(p,"value")).map_err(|_| "Не удалось сохранить ключ Devin в Связку ключей")?;
+                if values.as_object_mut().and_then(|v| v.remove(k)).is_none() {
+                    return Ok(json!({"ok":true}));
+                }
+            }
+            #[cfg(target_os = "macos")]
+            let use_file = devin_keychain.is_none();
+            #[cfg(not(target_os = "macos"))]
+            let use_file = true;
+            if use_file {
+                if p["value"].is_null() { values.as_object_mut().ok_or("Некорректное хранилище")?.remove(k); } else { values[k]=p["value"].clone(); }
+            }
             let bytes=if secret { values.as_object().ok_or("Некорректное хранилище")?.iter().map(|(k,v)| format!("{k}={v}\n")).collect::<String>().into_bytes() } else { values.to_string().into_bytes() };
             if bytes.len()>400000 { return Err("Хранилище ограничено 400 КБ".into()); } util::atomic_write(&file,&bytes)?; Ok(json!({"ok":true}))
         }

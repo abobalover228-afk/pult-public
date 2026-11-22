@@ -1,3 +1,4 @@
+import { devinProvider, devinClient } from './devin.js';
 import { call, on, ui, h, settings } from './core.js';
 import { button } from './render.js';
 const records=new Map(),contexts=new Set(),logs=new Map();
@@ -16,6 +17,7 @@ function teardown(id){
     for(const key of ids)if(key.startsWith(`mod:${id}:`)||key.startsWith(`${id}/`)){if(kind==='panels')ui.closePanel(key);ui.remove(kind,key);}
   }
   records.delete(id);
+  if(id==='devin')ui.setProviders(ui.providers.filter(p=>p.id!==devinProvider));
 }
 function frame(r,kind,name,input=''){
   const id=r.manifest.id;
@@ -72,6 +74,8 @@ async function refresh(){
     const enabled=new Map(rows.filter(r=>r.enabled&&r.approved&&r.manifest).map(r=>[r.manifest.id,r]));
     for(const[id,r]of records)if(enabled.get(id)?.fingerprint!==r.fingerprint)teardown(id);
     for(const[id,r]of enabled)if(!records.has(id))register(r);
+    if(records.has('devin') && !ui.providers.some(p=>p.id===devinProvider))
+      ui.setProviders([...ui.providers,{id:devinProvider,title:'Devin',model:''}]);
   }finally{refreshing=false;}
 }
 async function event(r,name,detail,permission){
@@ -171,3 +175,9 @@ setInterval(async()=>{
   }catch(error){console.error(error);}finally{pulseRunning=false;}
 },500);
 try{await refresh();const theme=await settings.get('modTheme');if(records.has(theme))applyTheme(records.get(theme));}catch(error){ui.toast(String(error));}
+
+ui.devin = { connect() {
+  const r = records.get('devin');
+  if (!r) throw new Error('Включи мод Devin');
+  return devinClient((method, params) => native(r, method, params));
+} };

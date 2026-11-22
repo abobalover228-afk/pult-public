@@ -2,7 +2,8 @@
 // (каждая в своём worktree), два ревьюера на разных моделях проверяют diff, волна сливается и проверяется,
 // следующая стартует от слитого результата. В рабочую ветку эпик вливается только по кнопке.
 import { call, ui, h, settings } from './core.js';
-import { button, icon } from './render.js';
+import { button } from './render.js';
+import { sphere } from './sphere.js';
 
 const ROLES = { planner: 'План', worker: 'Работа', review1: 'Ревью 1', review2: 'Ревью 2' };
 const DEFAULT_ROLES = { planner: { target: 'claude', model: 'opus' }, worker: { target: 'codex', model: '' }, review1: { target: 'claude', model: 'sonnet' }, review2: { target: 'codex', model: '' } };
@@ -10,6 +11,8 @@ const TASK = { queued: 'В очереди', working: 'Работает', review:
 const EPIC = { draft: 'Черновик', planning: 'Планирую', planned: 'План готов', running: 'Едет', paused: 'Пауза', needsYou: 'Нужен ты', review: 'Приёмка', done: 'Принят' };
 const MAX_ROUNDS = 2;
 let epics = [], selected = null, lessons = {}, root = null, timer = 0, saving = 0;
+const expandedHistory = new Set();
+const viewedWave = new Map();
 const closing = new Set();   // волна закрывается одной цепочкой, даже если две задачи доделались разом
 
 const uuid = () => crypto.randomUUID();
@@ -107,17 +110,42 @@ Diff против ветки эпика${d.truncated ? ' (обрезан, ост
 \`\`\`diff
 ${d.diff}
 \`\`\`
-Ищи баги, недоделки и расхождения с задачей. Стиль и мелочи не в счёт. Ответь блоком:
+Ищи баги, недоделки и расхождения с задачей. Стиль и мелочи не в счёт. Если есть дефекты, verdict должен быть "fix", а notes — непустым списком конкретных замечаний с файлом и строкой. Если дефектов нет, ответь блоком:
 \`\`\`pult-review
-{"verdict":"ok или fix","notes":["конкретное замечание с файлом и строкой"]}
-\`\`\``).catch(err => verdict(e, t, slot, { verdict: 'fix', notes: ['Ревьюер не запустился: ' + err] }));
+{"verdict":"ok","notes":[]}
+\`\`\``).catch(err => reviewError(e, t, slot, 'Ревьюер не запустился: ' + err));
   }
+}
+
+function reviewError(e, t, slot, reason) {
+  const r = t.reviews.find(r => r.slot === slot);
+  if (!r || r.verdict !== 'pending') return;
+  r.verdict = 'error'; r.notes = [reason];
+  stuck(e, t, `${ROLES[slot]}: ${reason}. Повтори ревью.`);
+}
+
+async function readVerdict(e, t, chat, text, failed) {
+  const slot = chat.conveyor.slot;
+  const r = t.reviews.find(r => r.slot === slot && r.chat === chat.id);
+  if (!r || r.verdict !== 'pending' || t.status !== 'review') return;
+  if (failed) { reviewError(e, t, slot, 'Ход ревьюера прервался'); return; }
+  let v; try { v = JSON.parse(block(text, 'pult-review')); } catch {}
+  const notes = Array.isArray(v?.notes) ? v.notes.filter(n => typeof n === 'string' && n.trim()).map(n => n.trim()).slice(0, 12) : [];
+  if (v && ['ok', 'fix'].includes(v.verdict) && Array.isArray(v.notes) && (v.verdict === 'ok' || notes.length)) {
+    await verdict(e, t, slot, { verdict: v.verdict, notes }); return;
+  }
+  if (!r.retried) {
+    r.retried = true; log(e, `${ROLES[slot]}: повторно запрашиваю вердикт`, 'warn'); save();
+    await send(chat, 'Ответ не содержит корректного вердикта. Заверши ревью и ответь только блоком ```pult-review\n{"verdict":"ok","notes":[]}\n```. Если есть конкретные дефекты, укажи "fix" и непустой список notes с файлами и описанием проблемы.');
+    return;
+  }
+  reviewError(e, t, slot, 'Не получен корректный вердикт после повторного запроса');
 }
 
 async function verdict(e, t, slot, v) {
   const r = t.reviews.find(r => r.slot === slot); if (!r || r.verdict !== 'pending') return;
   Object.assign(r, v); drop(chatOf(r.chat)); save();
-  if (t.reviews.some(r => r.verdict === 'pending')) return;
+  if (t.status !== 'review' || t.reviews.some(r => !['ok', 'fix'].includes(r.verdict))) return;
   const notes = t.reviews.filter(r => r.verdict !== 'ok').flatMap(r => r.notes.map(n => `${ROLES[r.slot]}: ${n}`));
   if (!notes.length) { await accept(e, t); return; }
   if (t.round >= MAX_ROUNDS) { stuck(e, t, `После ${MAX_ROUNDS} кругов ревьюеры всё ещё против`); return; }
@@ -199,10 +227,7 @@ function onChat(ev) {
     if (ev.failed) stuck(e, t, 'Ход агента прервался'); else review(e, t).catch(err => stuck(e, t, String(err)));
   }
   if (m.role === 'reviewer') {
-    let v; try { v = JSON.parse(block(text, 'pult-review')); } catch {}
-    const ok = v && ['ok', 'fix'].includes(v.verdict);
-    verdict(e, t, m.slot, ok ? { verdict: v.verdict, notes: (Array.isArray(v.notes) ? v.notes : []).map(String).slice(0, 12) }
-      : { verdict: 'fix', notes: ['Ревьюер не вынес вердикт: ' + text.slice(-300)] }).catch(err => stuck(e, t, String(err)));
+    readVerdict(e, t, ev.chat, text, ev.failed).catch(err => reviewError(e, t, m.slot, String(err)));
   }
 }
 
@@ -240,6 +265,7 @@ function card(e, t, index) {
   if (chat) actions.push(act('Агент', () => ui.chats.activate(chat.id), 'ghost'));
   if (t.status === 'needsYou') {
     if (t.conflict) actions.push(act('Разрулить конфликт', async () => { t.conflict = false; t.status = 'fixing'; e.status = 'running'; e.problem = null; t.merged = false; const c = chatOf(t.chat) || agent(e, 'worker', t.cwd, `▸ ${t.title}`, { task: t.id }); t.chat = c.id; save(); await send(c, `Влей в эту ветку ветку эпика (git merge ${e.branch}), разреши конфликты, сохрани смысл обеих сторон и закоммить слияние.`); }, 'primary'));
+    else if (t.reviews?.some(r => r.verdict === 'error')) actions.push(act('Повторить ревью', () => review(e, t), 'primary'));
     else actions.push(act(t.cwd ? 'Продолжить' : 'Повторить', () => { e.status = 'running'; return work(e, t, !!t.cwd); }, 'primary'));
     if (t.cwd) actions.push(act('Принять', () => accept(e, t)));
     actions.push(act('Пропустить', () => { t.status = 'skipped'; log(e, 'Пропущена: ' + t.title, 'warn'); save(); pump(e); }, 'ghost'));
@@ -254,24 +280,33 @@ function card(e, t, index) {
 }
 
 function belt(e) {
-  const nodes = [];
-  e.waves.forEach((w, i) => {
-    const done = w.tasks.filter(t => ['done', 'skipped'].includes(t.status)).length;
-    const state = i < e.wave ? 'done' : i === e.wave && ['running', 'needsYou', 'paused'].includes(e.status) ? 'current' : '';
-    if (i) nodes.push(el('div', { className: `cv-link ${i <= e.wave ? 'passed' : ''} ${i === e.wave && e.status === 'running' ? 'moving' : ''}` }, el('span')));
-    nodes.push(el('section', { className: 'cv-wave ' + state },
-      el('div.cv-wave-head', {}, el('b', {}, `Волна ${i + 1}`), el('small', {}, `${done}/${w.tasks.length}`)),
-      el('div.cv-bar', {}, el('i', { style: `width:${w.tasks.length ? done / w.tasks.length * 100 : 0}%` })),
-      ...w.tasks.map((t, j) => card(e, t, j)),
-      e.check && e.status !== 'planned' ? el('div', { className: `cv-gate ${i < e.wave ? 'passed' : ''}` }, icon('check'), 'Слияние · ' + e.check) : null));
+  if (e.status === 'planned') return el('div.cv-belt', {}, ...e.waves.map((w, i) => el('section.cv-wave', {}, el('div.cv-wave-head', {}, el('b', {}, `Волна ${i + 1}`)), ...w.tasks.map((t, j) => card(e, t, j)))));
+  const index = Math.min(viewedWave.get(e.id) ?? e.wave, e.waves.length - 1);
+  const wave = e.waves[index];
+  const positions = [[17, 30], [83, 30], [13, 57], [87, 57], [19, 83], [81, 83]];
+  const graph = el('div.cv-graph', {});
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.classList.add('cv-edges'); svg.setAttribute('viewBox', '0 0 1000 620'); svg.setAttribute('preserveAspectRatio', 'none'); svg.setAttribute('aria-hidden', 'true');
+  const line = (x, y) => { const l = document.createElementNS(svg.namespaceURI, 'line'); l.setAttribute('x1', '500'); l.setAttribute('y1', '310'); l.setAttribute('x2', String(x * 10)); l.setAttribute('y2', String(y * 6.2)); svg.append(l); };
+  line(50, 9);
+  const nodes = wave.tasks.map((t, i) => {
+    const [x, y] = positions[i]; line(x, y);
+    const node = card(e, t, i); node.classList.add('cv-node'); node.style.left = x + '%'; node.style.top = y + '%';
+    return node;
   });
-  if (e.waves.length && e.status !== 'planned') {
-    const ended = ['review', 'done'].includes(e.status);
-    nodes.push(el('div', { className: `cv-link ${ended ? 'passed' : ''}` }, el('span')));
-    nodes.push(el('section', { className: `cv-wave cv-finish ${e.status}` }, el('div.cv-wave-head', {}, el('b', {}, 'Приёмка')),
-      el('ol.cv-steps', {}, ...[['Ветка эпика', !!e.branch], [`Влить в ${e.base || 'ветку'}`, e.status === 'done'], [e.deploy ? 'Выкатка' : 'Без выкатки', e.status === 'done']].map(([k, ok]) => el('li', { className: ok ? 'ok' : '' }, k)))));
-  }
-  return el('div.cv-belt', {}, ...nodes);
+  const active = wave.tasks.filter(t => ['working', 'review', 'fixing'].includes(t.status)).length;
+  const needs = wave.tasks.filter(t => t.status === 'needsYou').length;
+  const status = needs ? 'НУЖЕН ТЫ' : e.status === 'paused' ? 'ПАУЗА' : e.status === 'done' ? 'ЗАВЕРШЕНО' : e.status === 'review' ? 'ЖДУ ПРИЁМКИ' : active ? 'ДЕЙСТВУЕТ' : 'НА СВЯЗИ';
+  const waveButtons = e.waves.map((w, i) => act(String(i + 1), () => { viewedWave.set(e.id, i); redraw(); }, i === index ? 'selected' : ''));
+  graph.append(svg,
+    el('div.cv-project-node', {}, el('strong', { title: e.title }, e.title), el('div.cv-group-tabs', {}, el('span', {}, 'волны'), ...waveButtons)),
+    ...nodes,
+    el('div.cv-orchestrator', { 'data-state': active ? 'thinking' : 'idle' },
+      el('button.cv-sphere-button', { type: 'button', title: 'Голосовой разговор', 'aria-label': 'Голосовой разговор', onclick: () => ui.openPanel('voice-sphere', 'main') }, sphere(180)),
+      el('span.cv-orchestrator-state', {}, status),
+      el('p.cv-orchestrator-caption', {}, needs ? `${needs} задач ждут твоего решения` : active ? `${active} задач в работе · волна ${index + 1}` : EPIC[e.status]),
+      el('p.cv-orchestrator-update', { title: e.log?.[0]?.text || '' }, e.log?.[0]?.text || 'Готов к запуску')));
+  return el('div.cv-map', {}, graph);
 }
 
 function controls(e) {
@@ -328,6 +363,12 @@ function draft() {
     }, 'primary big'));
 }
 
+function history(e) {
+  return el('details.cv-history', { open: expandedHistory.has(e.id), ontoggle: ev => { if (ev.target.open) expandedHistory.add(e.id); else expandedHistory.delete(e.id); } },
+    el('summary', {}, el('b', {}, 'История'), el('span.cv-latest', {}, e.log?.[0]?.text || 'Событий пока нет'), el('small', {}, String(e.log?.length || 0))),
+    el('ol.cv-log', {}, ...(e.log || []).map(l => el('li', { className: l.kind }, el('time', {}, new Date(l.t).toLocaleTimeString().slice(0, 5)), el('span', {}, l.text)))));
+}
+
 function view() {
   const e = epicOf(selected);
   const tabs = el('nav.cv-tabs', {}, ...epics.map(x => { const all = tasks(x), done = all.filter(t => t.status === 'done').length;
@@ -339,16 +380,16 @@ function view() {
   return el('div.cv', {}, tabs, hero(e), controls(e),
     e.problem ? el('div.cv-problem', {}, el('b', {}, e.problem.kind), el('pre', {}, e.problem.text)) : null,
     belted,
-    el('ol.cv-log', {}, ...(e.log || []).slice(0, 14).map(l => el('li', { className: l.kind }, el('time', {}, new Date(l.t).toLocaleTimeString().slice(0, 5)), l.text))));
+    history(e));
 }
 
 function redraw() {
   if (!root?.isConnected) return;
-  const scroll = root.querySelector('.cv-belt')?.scrollLeft || 0;
+  const scroll = root.querySelector('.cv-belt, .cv-map')?.scrollLeft || 0;
   const a = document.activeElement;
   if (root.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return; // не сбрасываем поле, пока в нём печатают
   root.replaceChildren(view());
-  const b = root.querySelector('.cv-belt'); if (b) b.scrollLeft = scroll;
+  const b = root.querySelector('.cv-belt, .cv-map'); if (b) b.scrollLeft = scroll;
 }
 
 ui.addPanel({ id: 'conveyor', title: 'Конвейер', slot: 'main', render(host) { root = host; root.classList.add('cv-host'); redraw(); clearInterval(timer); timer = setInterval(() => { const c = root?.querySelector('.cv-clock'); const e = epicOf(selected); if (c && e?.started && !e.finished) c.textContent = ago(now() - e.started); }, 1000); }, dispose() { clearInterval(timer); root = null; } });
@@ -363,6 +404,12 @@ if (saved) {
     if (e.status === 'planning') { e.status = 'draft'; e.error = 'Пульт перезапускался во время планирования'; }
     if (e.status === 'running') e.status = 'paused';
     for (const t of tasks(e)) if (['working', 'review', 'fixing'].includes(t.status)) Object.assign(t, { status: 'needsYou', note: 'Пульт перезапускался — продолжи', waiting: false });
+    for (const t of tasks(e)) {
+      const invalid = (t.reviews || []).filter(r => r.notes?.some(n => /^Ревьюер не (вынес вердикт|запустился)/.test(n)));
+      if (!invalid.length || ['done', 'skipped'].includes(t.status)) continue;
+      for (const r of invalid) r.verdict = 'error';
+      t.status = 'needsYou'; t.note = 'Прошлое ревью завершилось без вердикта — повтори проверку';
+    }
   }
   selected = epics[0]?.id || null;
 }

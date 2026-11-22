@@ -1,3 +1,4 @@
+import { devinProvider } from './devin.js';
 import './models.js';
 import './coach.js';
 import { ui, call, h } from './core.js';
@@ -12,6 +13,7 @@ ui.addCommand({ name: 'compact', hint: 'Сжать контекст', run: (_, c
   return c.thread ? ui.chats.rpc(c, 'thread/compact/start', { threadId: c.thread }) : ui.toast('Сначала начни диалог');
 } });
 ui.addCommand({ name: 'model', hint: 'Сменить модель', run: async (name, c) => {
+  if (c.target === devinProvider) return ui.toast('Devin сам выбирает модель для сессии');
   if (c.target.startsWith('api:')) return ui.toast('Модель API меняется в настройках подключения');
   if (c.busy) throw new Error('Сначала заверши текущий ход');
   if (!name.trim()) return ui.models.open(c);
@@ -38,7 +40,9 @@ command('cd', 'Сменить папку проекта', async (path, c) => {
 });
 command('pwd', 'Папка проекта', (_, c) => note(c, c.cwd));
 command('status', 'Состояние диалога', (_, c) => note(c, `Провайдер: ${c.target}\nМодель: ${c.model || 'по умолчанию'}\nПапка: ${c.cwd}\nСессия: ${c.thread || c.session || 'новая'}\n${c.busy ? 'Работает' : 'Готов'}`));
-command('usage', 'Квоты и токены', (_, c) => c.target === 'codex' ? codex(c, 'account/rateLimits/read') : note(c, c.usage || 'Квоты API смотри у провайдера; Claude — в виджете Лимитов'));
+command('session', 'Подключить сессию Devin', (input, c) => ui.chats.devinCommand('session', input, c));
+command('open', 'Открыть сессию Devin в браузере', (input, c) => ui.chats.devinCommand('open', input, c));
+command('usage', 'Статус и ACU Devin или квоты провайдера', (_, c) => c.target === devinProvider ? ui.chats.devinCommand('usage', '', c) : c.target === 'codex' ? codex(c, 'account/rateLimits/read') : note(c, c.usage || 'Квоты API смотри у провайдера; Claude — в виджете Лимитов'));
 command('copy', 'Скопировать последний ответ', async (_, c) => { const answer = c.messages.findLast(m => m.kind === 'agent'); if (!answer) throw new Error('Ответа пока нет'); await navigator.clipboard.writeText(answer.text); ui.toast('Ответ скопирован'); });
 command('rename', 'Переименовать диалог', async (name, c) => { if (!name.trim()) throw new Error('/rename название'); if (c.target === 'codex' && c.thread) await ui.chats.rpc(c, 'thread/name/set', { threadId: c.thread, name }); c.title = name.trim(); ui.chats.refresh(c); await ui.chats.save(c); });
 command('diff', 'Изменения проекта', (_, c) => ui.chats.exec('git', ['diff', '--no-ext-diff', '--no-textconv', 'HEAD', '--'], { chat: c }));

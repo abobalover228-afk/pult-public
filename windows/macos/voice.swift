@@ -18,13 +18,19 @@ func fail(_ message: String) -> Never {
 let input = FileHandle.standardInput.readDataToEndOfFile()
 guard let request = try? JSONSerialization.jsonObject(with: input) as? [String: Any], let action = request["action"] as? String else { fail("bad request") }
 let language = request["language"] as? String ?? "ru-RU"
+let selectedVoice = request["voice"] as? String ?? ""
 
 final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     let synth = AVSpeechSynthesizer()
     func speak(_ text: String) {
         synth.delegate = self
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: language)
+        if !selectedVoice.isEmpty {
+            guard let voice = AVSpeechSynthesisVoice(identifier: selectedVoice) else { fail("voice unavailable") }
+            utterance.voice = voice
+        } else {
+            utterance.voice = AVSpeechSynthesisVoice(language: language)
+        }
         synth.speak(utterance)
     }
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) { reply(["ok": true]) }
@@ -65,6 +71,8 @@ final class Listener {
 let speaker = Speaker()
 let listener = Listener()
 switch action {
+case "voices":
+    reply(["voices": AVSpeechSynthesisVoice.speechVoices().sorted { ($0.language, $0.name) < ($1.language, $1.name) }.map { ["id": $0.identifier, "name": $0.name, "language": $0.language] }])
 case "speak":
     speaker.speak(request["text"] as? String ?? "")
 case "listen":

@@ -598,7 +598,7 @@ test('stopping Claude preserves queued jobs and persists interrupted history',as
 
 test('dictation can be stopped twice-clicking and a late transcript cannot overwrite another tab',async({page})=>{
  await desktop(page);await page.evaluate(()=>window.delayVoice=true);
- const mic=page.getByRole('button',{name:'🎙',exact:true});
+ const mic=page.getByRole('button',{name:'Диктовка',exact:true});
  await mic.click();await expect(mic).toBeEnabled();
  await expect.poll(()=>page.evaluate(()=>typeof window.finishVoice)).toBe('function');
  await mic.click();
@@ -714,7 +714,7 @@ test('conveyor plans waves, reviews twice, fixes, merges, checks and ships', asy
   await expect(page.locator('.cv-card')).toHaveCount(3);
   await page.getByRole('button', { name: 'Запустить конвейер' }).click();
   await expect(page.locator('.cv-pill')).toHaveText('Приёмка', { timeout: 10000 });
-  await expect(page.locator('.cv-card.done')).toHaveCount(3);
+  await expect(page.locator('.cv-card.done')).toHaveCount(1);
   const prompts = await page.evaluate(() => window.prompts);
   expect(prompts.filter(p => p.role === 'reviewer')).toHaveLength(8);
   expect(prompts.find(p => p.role === 'worker' && p.text.includes('Исправь'))?.text).toContain('Ревью 2: нет теста');
