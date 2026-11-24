@@ -8,6 +8,7 @@ mod claude;
 mod codex;
 mod computer;
 mod conveyor;
+mod devin;
 mod limits;
 mod mods;
 mod mcp;
@@ -27,6 +28,7 @@ async fn call(app: AppHandle, module: String, method: String, args: Value) -> Re
         "app" => util::call(&app, &method, args).await,
         "codex" => codex::call(&app, &method, args).await,
         "claude" => claude::call(&app, &method, args).await,
+        "devin" => devin::call(&app, &method, args).await,
         "api" => api::call(&app, &method, args).await,
         "mcp" => mcp::call(&app, &method, args).await,
         "mods" => mods::call(&app, &method, args).await,

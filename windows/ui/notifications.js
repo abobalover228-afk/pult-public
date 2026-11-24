@@ -13,7 +13,8 @@ ui.chats.onEvent(e=>{
   if(e.type==='turnEnd'){
     title=`${e.failed?'Ошибка':'Готово'} · ${e.chat.title}`;
     body=e.failed?'Проверь результат в Пульте.':e.chat.messages.findLast(m=>m.kind==='agent')?.text||'Ход завершён.';
-  }else if(e.type==='message'&&!e.message.done&&['approval','question'].includes(e.message.kind)){
+  }else if(e.type==='message'&&!e.message.done&&!e.message.auto&&['approval','question'].includes(e.message.kind)){
+    // Автоподтверждённые запросы не дёргают пользователя.
     title=`${e.message.kind==='approval'?'Нужно разрешение':'Нужен ответ'} · ${e.chat.title}`;body=e.message.text;
   }else return;
   call('app','notify',{title,body,background:true}).catch(ui.toast);

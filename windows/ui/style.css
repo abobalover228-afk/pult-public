@@ -498,3 +498,31 @@ html.dk-page,html.dk-page body{background:transparent!important;min-height:0;ove
 .voice-picker select{max-width:230px;border:1px solid var(--line);border-radius:8px;background:var(--raised);color:var(--text);padding:7px 10px;font-size:12px}
 .voice-preview{border:1px solid #d6a23455;border-radius:8px;background:transparent;color:#efbc50;padding:7px 12px;font-size:12px}
 .voice-picker-hint{flex-basis:100%;font-size:10px;color:var(--muted);text-align:center;overflow-wrap:anywhere}
+
+/* Тотал-апдейт: сфера-кнопка, агенты, авторазрешения, ранние сообщения */
+button.voice-orbit{background:none;border:0;padding:0;border-radius:50%;cursor:pointer}
+button.voice-orbit:focus-visible{outline:2px solid var(--accent);outline-offset:6px}
+.voice-picker-hint{max-width:440px;line-height:1.4}
+.feed-more{align-self:center;margin:6px auto 14px;display:block;opacity:.8}
+.message.approval.auto{padding-top:2px;padding-bottom:2px;opacity:.62;font-size:12px}
+.message.approval.auto .message-body{color:var(--muted)}
+.message.approval.auto .approval-what{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.message.approval.resolved:not(.auto){opacity:.8}
+.approval-what{white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.approval-result{display:block;color:var(--muted);margin-top:4px}
+.approval-raw summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:6px}
+.tool-spinner{display:inline-block;width:9px;height:9px;margin-left:8px;border:1.5px solid var(--muted);border-top-color:transparent;border-radius:50%;animation:pult-spin .9s linear infinite;vertical-align:middle}
+.tool-exit{margin-left:8px;color:#e5806b;font-size:11px}
+@keyframes pult-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.tool-spinner{animation:none}}
+.agent-roster{display:grid;gap:6px}
+.agent-row{display:grid;grid-template-columns:10px auto auto 1fr;gap:8px;align-items:baseline;font-size:12.5px}
+.agent-row small{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);align-self:center}
+.agent-row.running .agent-dot,.agent-row.pendingInit .agent-dot{animation:pult-pulse 1.2s ease-in-out infinite}
+.agent-row.completed .agent-dot{background:#7fbf7a}
+.agent-row.errored .agent-dot{background:#e5806b}
+.agent-status{color:var(--muted)}
+@keyframes pult-pulse{50%{opacity:.35}}
+button.danger,button.active.danger{color:#e5a04b}
+.ring-tile.devin .devin-disc{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:600;color:var(--text);background:radial-gradient(circle at 35% 30%,#3d6bff55,#1b2a6b33);box-shadow:inset 0 0 0 3px #4d78ff66;max-width:none}

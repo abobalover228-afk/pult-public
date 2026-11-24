@@ -206,7 +206,7 @@ function onChat(ev) {
   const m = ev.chat.conveyor; if (!m) return;
   const e = epicOf(m.epic); if (!e) return;
   const t = m.task && tasks(e).find(t => t.id === m.task);
-  if (ev.type === 'message' && ev.message.kind === 'approval' && !ev.message.done && t) { t.waiting = true; redraw(); return; }
+  if (ev.type === 'message' && ev.message.kind === 'approval' && !ev.message.done && !ev.message.auto && t) { t.waiting = true; redraw(); return; }
   if (ev.type === 'turnStart' && t) { t.waiting = false; redraw(); return; }
   if (ev.type !== 'turnEnd') return;
   const text = turnText(ev.chat);

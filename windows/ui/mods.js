@@ -75,7 +75,7 @@ async function refresh(){
     for(const[id,r]of records)if(enabled.get(id)?.fingerprint!==r.fingerprint)teardown(id);
     for(const[id,r]of enabled)if(!records.has(id))register(r);
     if(records.has('devin') && !ui.providers.some(p=>p.id===devinProvider))
-      ui.setProviders([...ui.providers,{id:devinProvider,title:'Devin',model:''}]);
+      ui.setProviders([...ui.providers,{id:devinProvider,title:'Devin Cloud',model:''}]);
   }finally{refreshing=false;}
 }
 async function event(r,name,detail,permission){
@@ -163,17 +163,19 @@ ui.chats.onEvent(e=>{
   if(e.type==='message'&&['approval','question'].includes(e.message.kind))for(const r of records.values())event(r,e.message.kind==='question'?'chat.question':'chat.approval',{id:e.chat.id},'chats.read');
 });
 await on('mods',e=>{const r=records.get(e.id);if(r&&r.fingerprint===e.fingerprint)event(r,e.event,e.detail);});
-let pulseRunning=false;
+// Пульс модов: тик раз в секунду; список модов с диска — раз в 5 с, их настройки — раз в 2 с.
+// Раньше всё это шло каждые 0,5 с и держало процессор занятым без дела.
+let pulseRunning=false,pulse=0;
 setInterval(async()=>{
-  if(pulseRunning)return;pulseRunning=true;
+  pulse++;if(pulseRunning||(document.hidden&&pulse%10))return;pulseRunning=true;
   try{
-    await refresh();const chats=ui.chats.list().map(summary),next=JSON.stringify(chats);const changed=next!==signature;signature=next;
+    if(pulse%5===1)await refresh();const chats=ui.chats.list().map(summary),next=JSON.stringify(chats);const changed=next!==signature;signature=next;
     for(const r of records.values()){
       await event(r,'app.tick',{time:Date.now()/1000});if(changed)await event(r,'chats.changed',{chats,activeID:ui.chats.current()?.id},'chats.read');
-      const values=await native(r,'settings.get'),key=JSON.stringify(values);if(key!==r.settingsKey){r.settingsKey=key;await event(r,'settings.changed',{settings:values});}
+      if(pulse%2===1||!r.settingsKey){const values=await native(r,'settings.get'),key=JSON.stringify(values);if(key!==r.settingsKey){r.settingsKey=key;await event(r,'settings.changed',{settings:values});}}
     }
   }catch(error){console.error(error);}finally{pulseRunning=false;}
-},500);
+},1000);
 try{await refresh();const theme=await settings.get('modTheme');if(records.has(theme))applyTheme(records.get(theme));}catch(error){ui.toast(String(error));}
 
 ui.devin = { connect() {

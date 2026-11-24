@@ -20,6 +20,24 @@ guard let request = try? JSONSerialization.jsonObject(with: input) as? [String: 
 let language = request["language"] as? String ?? "ru-RU"
 let selectedVoice = request["voice"] as? String ?? ""
 
+func quality(_ v: AVSpeechSynthesisVoice) -> String {
+    if #available(macOS 13.0, *), v.quality == .premium { return "premium" }
+    return v.quality == .enhanced ? "enhanced" : "default"
+}
+func novelty(_ v: AVSpeechSynthesisVoice) -> Bool {
+    if #available(macOS 14.0, *) { return v.voiceTraits.contains(.isNoveltyVoice) }
+    return false
+}
+// Без выбранного голоса — лучший установленный для языка: premium → enhanced → обычный.
+func bestVoice(_ language: String) -> AVSpeechSynthesisVoice? {
+    let prefix = String(language.prefix(2))
+    let voices = AVSpeechSynthesisVoice.speechVoices().filter { $0.language == language || $0.language.hasPrefix(prefix) }
+    let rank: (AVSpeechSynthesisVoice) -> Int = { v in
+        (v.language == language ? 10 : 0) + (["premium": 3, "enhanced": 2][quality(v)] ?? 0) - (novelty(v) ? 20 : 0)
+    }
+    return voices.max { rank($0) < rank($1) } ?? AVSpeechSynthesisVoice(language: language)
+}
+
 final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     let synth = AVSpeechSynthesizer()
     func speak(_ text: String) {
@@ -29,8 +47,11 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             guard let voice = AVSpeechSynthesisVoice(identifier: selectedVoice) else { fail("voice unavailable") }
             utterance.voice = voice
         } else {
-            utterance.voice = AVSpeechSynthesisVoice(language: language)
+            utterance.voice = bestVoice(language)
         }
+        // Чуть быстрее системного темпа: разговор, а не диктант.
+        utterance.rate = min(AVSpeechUtteranceMaximumSpeechRate, AVSpeechUtteranceDefaultSpeechRate * 1.08)
+        utterance.prefersAssistiveTechnologySettings = false
         synth.speak(utterance)
     }
     func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) { reply(["ok": true]) }
@@ -47,6 +68,9 @@ final class Listener {
     func start() {
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language)), recognizer.isAvailable else { fail("recognizer unavailable") }
         request.shouldReportPartialResults = true
+        // Знаки препинания и распознавание на устройстве (быстрее и без сети), если язык это умеет.
+        if #available(macOS 13.0, *) { request.addsPunctuation = true }
+        if recognizer.supportsOnDeviceRecognition { request.requiresOnDeviceRecognition = true }
         let node = engine.inputNode
         node.installTap(onBus: 0, bufferSize: 1024, format: node.outputFormat(forBus: 0)) { [request] buffer, _ in request.append(buffer) }
         engine.prepare()
@@ -60,9 +84,14 @@ final class Listener {
                 if result.isFinal { self.finish() }
             } else if error != nil { self.finish() }
         }
+        // Ничего не сказали за 9 секунд — отдаём пустой ответ, интерфейс решит, слушать ли дальше.
+        Timer.scheduledTimer(withTimeInterval: 9, repeats: false) { _ in if self.text.isEmpty { self.finish() } }
         Timer.scheduledTimer(withTimeInterval: 40, repeats: false) { _ in self.finish() }
     }
+    var finished = false
     func finish() {
+        if finished { return }
+        finished = true
         engine.stop(); engine.inputNode.removeTap(onBus: 0); request.endAudio(); task?.cancel()
         reply(["text": text])
     }
@@ -72,7 +101,7 @@ let speaker = Speaker()
 let listener = Listener()
 switch action {
 case "voices":
-    reply(["voices": AVSpeechSynthesisVoice.speechVoices().sorted { ($0.language, $0.name) < ($1.language, $1.name) }.map { ["id": $0.identifier, "name": $0.name, "language": $0.language] }])
+    reply(["voices": AVSpeechSynthesisVoice.speechVoices().sorted { ($0.language, $0.name) < ($1.language, $1.name) }.map { ["id": $0.identifier, "name": $0.name, "language": $0.language, "quality": quality($0)] }])
 case "speak":
     speaker.speak(request["text"] as? String ?? "")
 case "listen":

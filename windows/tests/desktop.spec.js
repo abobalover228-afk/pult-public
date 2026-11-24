@@ -485,13 +485,16 @@ test('auto approval can be toggled during a turn and drains pending actions only
   await event(page, identity, 'item/fileChange/requestApproval', {}, 14);
   expect(await page.evaluate(() => window.calls.filter(r => r.method === 'respond').map(r => ({ id: r.args.id, result: r.args.result })))).toEqual([
     { id: 10, result: { decision: 'accept' } },
+    { id: 12, result: { action: 'accept', content: null } },
     { id: 13, result: { permissions, scope: 'turn' } },
     { id: 14, result: { decision: 'accept' } },
   ]);
+  // Вопрос с вариантами ответа автоподтверждение не трогает — его решает человек.
+  expect(await page.evaluate(() => window.calls.some(r => r.method === 'respond' && r.args.id === 11))).toBe(false);
   await toggle.click();
   await expect(toggle).not.toHaveClass(/active/);
   await event(page, identity, 'execCommandApproval', {}, 15);
-  expect(await page.evaluate(() => window.calls.filter(r => r.method === 'respond').map(r => r.args.id))).toEqual([10, 13, 14]);
+  expect(await page.evaluate(() => window.calls.filter(r => r.method === 'respond').map(r => r.args.id))).toEqual([10, 12, 13, 14]);
 });
 
 test('provider exit completes failed turns and expires pending approvals', async ({ page }) => {
@@ -727,4 +730,25 @@ test('conveyor plans waves, reviews twice, fixes, merges, checks and ships', asy
   expect(calls.indexOf('task', calls.indexOf('run'))).toBeGreaterThan(calls.indexOf('run')); // вторая волна стартует после проверки первой
   await page.getByRole('button', { name: 'Влить в main' }).click();
   await expect(page.locator('.cv-pill')).toHaveText('Принят');
+});
+
+test('prompt suggestion appears after a turn and Tab accepts it', async ({ page }) => {
+  await desktop(page);
+  const composer = page.getByLabel('Сообщение', { exact: true });
+  await composer.fill('Почини тест'); await composer.press('Enter');
+  await expect.poll(() => page.evaluate(() => window.calls.some(x => x.args?.method === 'turn/start'))).toBe(true);
+  const chat = await chatIdentity(page);
+  await event(page, chat, 'item/completed', { item: { id: 'a1', type: 'agentMessage', text: 'Починил. Запустить тесты?' } });
+  await event(page, chat, 'turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  await expect.poll(() => page.evaluate(() => window.calls.filter(x => x.args?.method === 'turn/start').length)).toBe(2);
+  const helper = await page.evaluate(() => { const c = window.calls.filter(x => x.method === 'connect').at(-1); return { chat: c.args.chat, gen: c.args.gen }; });
+  expect(helper.chat).not.toBe(chat.chat);
+  expect(await page.evaluate(() => window.calls.find(x => x.args?.method === 'thread/start' && x.args.params.ephemeral).args.params.sandbox)).toBe('read-only');
+  await event(page, helper, 'item/completed', { item: { id: 's1', type: 'agentMessage', text: '"да, запусти тесты"\nлишнее' } });
+  await event(page, helper, 'turn/completed', { turn: { id: 'turn-1', status: 'completed' } });
+  await expect(composer).toHaveAttribute('placeholder', /^да, запусти тесты\s+⇥ Tab$/);
+  await composer.press('Tab');
+  await expect(composer).toHaveValue('да, запусти тесты');
+  await composer.press('Enter');
+  await expect(composer).not.toHaveAttribute('placeholder', /запусти тесты/);
 });

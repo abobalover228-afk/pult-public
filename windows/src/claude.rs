@@ -24,6 +24,8 @@ async fn write(s: &Session, message: Value) -> Result<(), String> {
 fn permission_mode(a: &Value) -> Result<&str, String> {
     match a["permissionMode"].as_str().unwrap_or("default") {
         "default" => Ok("default"), "plan" => Ok("plan"),
+        // Автоподтверждение: правки без вопросов; полный доступ (danger-full-access + автоподтверждение) — без вопросов вообще.
+        "acceptEdits" => Ok("acceptEdits"), "bypassPermissions" => Ok("bypassPermissions"),
         _ => Err("Неверный режим разрешений Claude".into()),
     }
 }

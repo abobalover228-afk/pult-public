@@ -24,6 +24,7 @@ static GENERATIONS: LazyLock<util::ProcessGenerations> = LazyLock::new(Default::
 static CLIENTS: LazyLock<Mutex<HashMap<String, Arc<Client>>>> = LazyLock::new(Default::default);
 static SHELLS: LazyLock<Mutex<HashMap<String, Arc<Notify>>>> = LazyLock::new(Default::default);
 static TITLES: LazyLock<Mutex<HashMap<PathBuf, (f64, String, String)>>> = LazyLock::new(Default::default);
+static LOCALS: LazyLock<Mutex<HashMap<PathBuf, (f64, Value)>>> = LazyLock::new(Default::default);
 
 pub fn init(_app: &AppHandle) {}
 
@@ -240,14 +241,26 @@ fn threads(a: &Value) -> Value {
         })
         .collect();
     out.extend(crate::claude::history().into_iter().filter(|r| !hidden.iter().any(|id| r["id"] == *id)));
+    // Сохранённые диалоги бывают по нескольку мегабайт: строку списка кэшируем по времени изменения файла.
+    let mut cache = LOCALS.lock().unwrap();
+    let mut seen = std::collections::HashSet::new();
     for e in std::fs::read_dir(conversations()).into_iter().flatten().flatten() {
-        let Some(v) = std::fs::read(e.path()).ok().and_then(|d| serde_json::from_slice::<Value>(&d).ok()) else { continue };
-        let id = format!("local:{}", v["id"].as_str().unwrap_or_default());
-        if !hidden.contains(&id) {
-            let account = if v["provider"] == "api" { "API".to_string() } else { format!("Ветка · {}", v["provider"].as_str().unwrap_or_default()) };
-            out.push(json!({ "id": id, "path": e.path(), "title": v["title"], "date": v["date"], "account": account, "cwd": v["directory"] }));
-        }
+        let (path, m) = (e.path(), mtime(&e.path()));
+        seen.insert(path.clone());
+        let row = match cache.get(&path).filter(|c| c.0 == m) {
+            Some(c) => c.1.clone(),
+            None => {
+                let Some(v) = std::fs::read(&path).ok().and_then(|d| serde_json::from_slice::<Value>(&d).ok()) else { continue };
+                let account = if v["provider"] == "api" { "API".to_string() } else { format!("Ветка · {}", v["provider"].as_str().unwrap_or_default()) };
+                let row = json!({ "id": format!("local:{}", v["id"].as_str().unwrap_or_default()), "path": path, "title": v["title"], "date": v["date"], "account": account, "cwd": v["directory"], "session": v["session"], "target": v["target"] });
+                cache.insert(path.clone(), (m, row.clone()));
+                row
+            }
+        };
+        if !hidden.iter().any(|id| row["id"] == *id) { out.push(row); }
     }
+    cache.retain(|p, _| seen.contains(p));
+    drop(cache);
     out.sort_by(|x, y| y["date"].as_f64().unwrap_or(0.0).total_cmp(&x["date"].as_f64().unwrap_or(0.0)));
     json!(out)
 }
